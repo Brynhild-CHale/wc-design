@@ -1,0 +1,110 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <style>
+    body {
+      margin: 0;
+      background: #efece5;
+      color: #1c1a17;
+      font-family: ui-sans-serif, 'Helvetica Neue', 'Segoe UI', system-ui, sans-serif;
+      -webkit-font-smoothing: antialiased;
+      text-wrap: pretty;
+    }
+    a { color: #a34b28; text-decoration: none; border-bottom: 1px solid rgba(163, 75, 40, 0.35); }
+    a:hover { color: #7b3719; border-bottom-color: rgba(123, 55, 25, 0.6); }
+  </style>
+</helmet>
+<div style="width: 480px; min-height: 620px; box-sizing: border-box; padding: 26px; background: #efece5; display: flex; flex-direction: column; gap: 20px;">
+
+  <div style="display: flex; align-items: center; gap: 10px;">
+    <img src="ridge-mark.svg" alt="Ridgeline" width="24" height="24" style="display: block; border-radius: 7px;">
+    <div style="font-size: 12px; letter-spacing: 0.4px; color: #6b655c; flex-grow: 1;">Ridgeline · Vault SSD</div>
+    <div style="font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace; font-size: 12px; color: #8a8377;">#0341</div>
+  </div>
+
+  <div style="display: flex; flex-direction: column; gap: 6px;">
+    <h1 style="margin: 0; font-family: 'Iowan Old Style', 'Palatino Linotype', Palatino, Georgia, serif; font-size: 26px; font-weight: 600; line-height: 1.2; letter-spacing: -0.2px;">Restore point</h1>
+    <div style="font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace; font-size: 13px; color: #6b655c;">2026-03-14 04:12 → 04:19</div>
+  </div>
+
+  <div style="display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px;">
+    <div style="display: flex; flex-direction: column; gap: 4px; padding: 13px 14px; background: #fffdf9; border: 1px solid #e2ddd3; border-radius: 10px;">
+      <div style="font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace; font-size: 19px; letter-spacing: -0.4px;">128,440</div>
+      <div style="font-size: 11.5px; color: #6b655c;">files</div>
+    </div>
+    <div style="display: flex; flex-direction: column; gap: 4px; padding: 13px 14px; background: #fffdf9; border: 1px solid #e2ddd3; border-radius: 10px;">
+      <div style="font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace; font-size: 19px; letter-spacing: -0.4px;">1,206</div>
+      <div style="font-size: 11.5px; color: #6b655c;">changed</div>
+    </div>
+    <div style="display: flex; flex-direction: column; gap: 4px; padding: 13px 14px; background: #fffdf9; border: 1px solid #e2ddd3; border-radius: 10px;">
+      <div style="font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace; font-size: 19px; letter-spacing: -0.4px;">4.8 GB</div>
+      <div style="font-size: 11.5px; color: #6b655c;">on disk</div>
+    </div>
+  </div>
+
+  <div style="display: flex; align-items: center; gap: 10px; padding: 12px 14px; background: #e3ede7; border: 1px solid #c9dcd0; border-radius: 10px;">
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#2f6b4f" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink: 0;" aria-hidden="true">
+      <circle cx="12" cy="12" r="9"></circle>
+      <path d="m8.5 12.2 2.4 2.4 4.6-4.9"></path>
+    </svg>
+    <div style="font-size: 13px; color: #2b5340; flex-grow: 1;">Checksums verified against the source at 04:19.</div>
+  </div>
+
+  <div style="display: flex; flex-direction: column; gap: 10px;">
+    <div style="font-size: 11.5px; font-weight: 700; letter-spacing: 0.9px; text-transform: uppercase; color: #8a8377;">Contents</div>
+    <div style="display: flex; flex-direction: column; gap: 1px; background: #e2ddd3; border: 1px solid #e2ddd3; border-radius: 10px; overflow: hidden;">
+
+      <div style="display: flex; align-items: center; gap: 11px; padding: 11px 14px; background: #fffdf9;">
+        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="#4a443b" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink: 0;" aria-hidden="true">
+          <path d="M3 7.5A1.5 1.5 0 0 1 4.5 6h4l2 2.5h7A1.5 1.5 0 0 1 19 10v7.5a1.5 1.5 0 0 1-1.5 1.5h-13A1.5 1.5 0 0 1 3 17.5z"></path>
+        </svg>
+        <div style="font-size: 13.5px; flex-grow: 1;">Documents</div>
+        <div style="font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace; font-size: 12.5px; color: #6b655c;">2.1 GB</div>
+      </div>
+
+      <div style="display: flex; align-items: center; gap: 11px; padding: 11px 14px; background: #fffdf9;">
+        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="#4a443b" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink: 0;" aria-hidden="true">
+          <path d="M3 7.5A1.5 1.5 0 0 1 4.5 6h4l2 2.5h7A1.5 1.5 0 0 1 19 10v7.5a1.5 1.5 0 0 1-1.5 1.5h-13A1.5 1.5 0 0 1 3 17.5z"></path>
+        </svg>
+        <div style="font-size: 13.5px; flex-grow: 1;">Projects</div>
+        <div style="font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace; font-size: 12.5px; color: #6b655c;">1.9 GB</div>
+      </div>
+
+      <div style="display: flex; align-items: center; gap: 11px; padding: 11px 14px; background: #fffdf9;">
+        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="#4a443b" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink: 0;" aria-hidden="true">
+          <rect x="3" y="6" width="18" height="13" rx="2"></rect>
+          <path d="m3.6 7.4 8.4 6 8.4-6"></path>
+        </svg>
+        <div style="font-size: 13.5px; flex-grow: 1;">Mail</div>
+        <div style="font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace; font-size: 12.5px; color: #6b655c;">612 MB</div>
+      </div>
+
+      <div style="display: flex; align-items: center; gap: 11px; padding: 11px 14px; background: #fffdf9;">
+        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="#4a443b" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink: 0;" aria-hidden="true">
+          <rect x="3" y="5" width="18" height="14" rx="2"></rect>
+          <circle cx="8.5" cy="10" r="1.6"></circle>
+          <path d="m4 17 5-5 4 3.5 3-2.5 4 4"></path>
+        </svg>
+        <div style="font-size: 13.5px; flex-grow: 1;">Photos</div>
+        <div style="font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace; font-size: 12.5px; color: #6b655c;">214 MB</div>
+      </div>
+
+    </div>
+    <div style="font-size: 12px; color: #8a8377;">Excluded by rule: caches, build output, virtual-machine images.</div>
+  </div>
+
+  <div style="display: flex; align-items: center; gap: 10px; margin-top: auto; padding-top: 16px; border-top: 1px solid #e2ddd3;">
+    <button type="button" style="height: 40px; padding: 0 16px; border: 1px solid #d6d0c4; border-radius: 9px; background: transparent; color: #4a443b; font: inherit; font-size: 13.5px; font-weight: 600; cursor: pointer;">Mount read-only</button>
+    <button type="button" style="flex-grow: 1; height: 40px; padding: 0 20px; border: 0; border-radius: 9px; background: #a34b28; color: #fdfbf7; font: inherit; font-size: 13.5px; font-weight: 600; cursor: pointer;">Restore files…</button>
+  </div>
+
+</div>
+</x-dc>
+</body>
+</html>

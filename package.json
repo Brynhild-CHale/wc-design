@@ -1,0 +1,33 @@
+{
+  "name": "wc-design",
+  "version": "0.1.0",
+  "description": "A web-chat component pack that mounts a live Claude Design canvas seeded from the .dc.html files in a directory you name. Ships none of Anthropic's code: the editor payload is read at runtime from the copy Claude Code already wrote on this machine.",
+  "license": "MIT",
+  "private": false,
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "keywords": [
+    "claude-web-chat",
+    "web-chat-pack",
+    "claude-design",
+    "canvas",
+    "design"
+  ],
+  "files": [
+    "web-chat-pack.json",
+    "SKILL.md",
+    "components",
+    "CONTRACT.md",
+    "FINDINGS.md",
+    "upstream.lock.json"
+  ],
+  "scripts": {
+    "test": "node scripts/check-no-vendored.mjs && node --test test/*.test.mjs",
+    "lint:pack": "node scripts/lint-pack.mjs",
+    "check": "npm run lint:pack && npm test",
+    "find-payload": "node scripts/find-payload.mjs",
+    "relock": "node scripts/relock.mjs"
+  }
+}

@@ -1,0 +1,192 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <style>
+    body {
+      margin: 0;
+      background: #efece5;
+      color: #1c1a17;
+      font-family: ui-sans-serif, 'Helvetica Neue', 'Segoe UI', system-ui, sans-serif;
+      -webkit-font-smoothing: antialiased;
+      text-wrap: pretty;
+    }
+    a { color: #a34b28; text-decoration: none; border-bottom: 1px solid rgba(163, 75, 40, 0.35); }
+    a:hover { color: #7b3719; border-bottom-color: rgba(123, 55, 25, 0.6); }
+  </style>
+</helmet>
+<div style="width: 560px; min-height: 720px; box-sizing: border-box; padding: 28px; background: #efece5; display: flex; flex-direction: column; gap: 22px;">
+
+  <div style="display: flex; align-items: center; gap: 12px;">
+    <img src="ridge-mark.svg" alt="Ridgeline" width="34" height="34" style="display: block; border-radius: 9px;">
+    <div style="display: flex; flex-direction: column; gap: 1px; flex-grow: 1;">
+      <div style="font-family: 'Iowan Old Style', 'Palatino Linotype', Palatino, Georgia, serif; font-size: 18px; letter-spacing: 0.2px;">Ridgeline</div>
+      <div style="font-size: 12px; color: #6b655c; letter-spacing: 0.4px;">Snapshot agent</div>
+    </div>
+    <div style="display: flex; align-items: center; gap: 7px; font-size: 12.5px; color: #5f594f; background: #e6e1d7; border-radius: 999px; padding: 6px 12px;">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#2f6b4f" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <circle cx="12" cy="12" r="9"></circle>
+        <path d="M12 7v5l3 2"></path>
+      </svg>
+      <span>Last run 04:12</span>
+    </div>
+  </div>
+
+  <div style="display: flex; flex-direction: column; gap: 7px;">
+    <h1 style="margin: 0; font-family: 'Iowan Old Style', 'Palatino Linotype', Palatino, Georgia, serif; font-size: 30px; font-weight: 600; line-height: 1.15; letter-spacing: -0.2px;">Backup schedule</h1>
+    <p style="margin: 0; font-size: 13.5px; line-height: 1.5; color: #6b655c; max-width: 44ch;">Snapshots run from this machine. Changes take effect at the next scheduled run, not retroactively.</p>
+  </div>
+
+  <div style="display: flex; flex-direction: column; gap: 10px;">
+    <div style="font-size: 11.5px; font-weight: 700; letter-spacing: 0.9px; text-transform: uppercase; color: #8a8377;">Frequency</div>
+    <div style="display: flex; gap: 6px; padding: 5px; background: #e3ded4; border-radius: 12px;">
+      <sc-for list="{{modes}}" as="opt" hint-placeholder-count="3">
+        <button type="button" onClick="{{opt.pick}}" style="{{opt.style}}">{{opt.label}}</button>
+      </sc-for>
+    </div>
+    <div style="font-size: 12.5px; line-height: 1.5; color: #6b655c;">{{cadenceNote}}</div>
+  </div>
+
+  <div style="display: flex; flex-direction: column; gap: 10px;">
+    <div style="font-size: 11.5px; font-weight: 700; letter-spacing: 0.9px; text-transform: uppercase; color: #8a8377;">Retention</div>
+    <div style="display: flex; flex-direction: column; gap: 8px;">
+      <sc-for list="{{rules}}" as="rule" hint-placeholder-count="3">
+        <div style="display: grid; grid-template-columns: 1fr auto; gap: 14px; align-items: center; padding: 12px 14px; background: #fffdf9; border: 1px solid #e2ddd3; border-radius: 10px;">
+          <div style="display: flex; flex-direction: column; gap: 3px;">
+            <div style="font-size: 14px; font-weight: 600;">{{rule.name}}</div>
+            <div style="font-size: 12.5px; color: #6b655c;">{{rule.detail}}</div>
+          </div>
+          <div style="font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace; font-size: 13px; background: #f1ede4; border-radius: 7px; padding: 5px 10px;">{{rule.value}}</div>
+        </div>
+      </sc-for>
+    </div>
+  </div>
+
+  <div style="display: flex; flex-direction: column; gap: 10px;">
+    <div style="font-size: 11.5px; font-weight: 700; letter-spacing: 0.9px; text-transform: uppercase; color: #8a8377;">Destinations</div>
+    <div style="display: flex; flex-direction: column; gap: 8px;">
+      <sc-for list="{{destinations}}" as="dest" hint-placeholder-count="2">
+        <div style="display: flex; align-items: center; gap: 12px; padding: 12px 14px; background: #fffdf9; border: 1px solid #e2ddd3; border-radius: 10px;">
+          <sc-if value="{{dest.isLocal}}" hint-placeholder-val="{{ true }}">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#4a443b" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <rect x="3" y="4" width="18" height="7" rx="2"></rect>
+              <rect x="3" y="13" width="18" height="7" rx="2"></rect>
+              <path d="M7 7.5h.01M7 16.5h.01"></path>
+            </svg>
+          </sc-if>
+          <sc-if value="{{dest.isRemote}}" hint-placeholder-val="{{ false }}">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#4a443b" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M7 18a4.5 4.5 0 0 1-.6-8.96A6 6 0 0 1 18 9.5a4.25 4.25 0 0 1-.5 8.5z"></path>
+              <path d="M12 12v5"></path>
+              <path d="M9.5 14.5 12 12l2.5 2.5"></path>
+            </svg>
+          </sc-if>
+          <div style="display: flex; flex-direction: column; gap: 3px; flex-grow: 1;">
+            <div style="font-size: 14px; font-weight: 600;">{{dest.name}}</div>
+            <div style="font-size: 12.5px; color: #6b655c;">{{dest.detail}}</div>
+          </div>
+          <span style="{{dest.statusStyle}}">{{dest.statusLabel}}</span>
+        </div>
+      </sc-for>
+    </div>
+    <sc-if value="{{needsAttention}}" hint-placeholder-val="{{ true }}">
+      <div style="display: flex; align-items: flex-start; gap: 10px; padding: 11px 13px; background: #f6ecd8; border: 1px solid #e6d5ae; border-radius: 10px;">
+        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="#8a6516" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink: 0; margin-top: 1px;" aria-hidden="true">
+          <path d="M12 4.5 21 19.5H3z"></path>
+          <path d="M12 10v4"></path>
+          <path d="M12 17h.01"></path>
+        </svg>
+        <div style="font-size: 12.5px; line-height: 1.5; color: #6b4f11;">{{attentionNote}}</div>
+      </div>
+    </sc-if>
+  </div>
+
+  <div style="display: flex; align-items: center; gap: 12px; margin-top: auto; padding-top: 18px; border-top: 1px solid #e2ddd3;">
+    <div style="font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace; font-size: 12px; color: #8a8377; flex-grow: 1;">{{nextRun}}</div>
+    <button type="button" style="height: 40px; padding: 0 16px; border: 1px solid #d6d0c4; border-radius: 9px; background: transparent; color: #4a443b; font: inherit; font-size: 13.5px; font-weight: 600; cursor: pointer;">Discard</button>
+    <button type="button" style="height: 40px; padding: 0 20px; border: 0; border-radius: 9px; background: {{accent}}; color: #fdfbf7; font: inherit; font-size: 13.5px; font-weight: 600; cursor: pointer;">Save changes</button>
+  </div>
+
+</div>
+</x-dc>
+<script data-dc-script data-props='{"accent":{"editor":"color","default":"#a34b28","options":["#a34b28","#2f6b4f","#3a4f7a","#6b3f78"],"section":"Theme"},"mode":{"editor":"enum","options":["hourly","daily","weekly"],"default":"daily","section":"Schedule"},"$preview":{"width":560,"height":720}}'>
+class Component extends DCLogic {
+  renderVals() {
+    var self = this;
+    var st = this.state || {};
+    var accent = this.props.accent || '#a34b28';
+    var mode = st.mode || this.props.mode || 'daily';
+
+    var segBase = 'flex: 1 1 0; height: 40px; border: 0; border-radius: 9px; font: inherit; font-size: 13.5px; font-weight: 600; letter-spacing: 0.2px; cursor: pointer;';
+    var segOn = ' background: ' + accent + '; color: #fdfbf7; box-shadow: 0 1px 2px rgba(28, 26, 23, 0.2);';
+    var segOff = ' background: transparent; color: #5f594f;';
+    var defs = [
+      { id: 'hourly', label: 'Hourly' },
+      { id: 'daily', label: 'Daily' },
+      { id: 'weekly', label: 'Weekly' }
+    ];
+    var modes = defs.map(function (d) {
+      var selected = d.id === mode;
+      return {
+        id: d.id,
+        label: d.label,
+        style: segBase + (selected ? segOn : segOff),
+        pick: function () { self.setState({ mode: d.id }); }
+      };
+    });
+
+    var cadence = {
+      hourly: 'A snapshot starts at the top of every hour while the machine is awake.',
+      daily: 'A snapshot starts at 20:00 local time, or at the first wake after it.',
+      weekly: 'A snapshot starts Sunday at 20:00 local time.'
+    };
+    var nextRun = {
+      hourly: 'Next run 15:00 · in 41 minutes',
+      daily: 'Next run 20:00 · in 5 h 41 m',
+      weekly: 'Next run Sunday 20:00 · in 3 days'
+    };
+
+    var pill = 'font-size: 11px; font-weight: 700; letter-spacing: 0.5px; text-transform: uppercase; padding: 5px 10px; border-radius: 999px; white-space: nowrap;';
+    var destinations = [
+      {
+        name: 'Vault SSD',
+        detail: 'Attached disk · 1.4 TB free',
+        isLocal: true,
+        isRemote: false,
+        statusLabel: 'Healthy',
+        statusStyle: pill + ' color: #2f6b4f; background: #e3ede7;'
+      },
+      {
+        name: 'Object storage',
+        detail: 'eu-west-1 · versioned bucket',
+        isLocal: false,
+        isRemote: true,
+        statusLabel: 'Needs key',
+        statusStyle: pill + ' color: #8a6516; background: #f3e9d5;'
+      }
+    ];
+
+    return {
+      accent: accent,
+      modes: modes,
+      cadenceNote: cadence[mode] || cadence.daily,
+      nextRun: nextRun[mode] || nextRun.daily,
+      rules: [
+        { name: 'Hourly snapshots', detail: 'Kept for 48 hours, then thinned to one a day', value: '48h' },
+        { name: 'Daily snapshots', detail: 'Kept for 30 days', value: '30d' },
+        { name: 'Monthly archives', detail: 'Kept for 12 months, then deleted', value: '12m' }
+      ],
+      destinations: destinations,
+      needsAttention: true,
+      attentionNote: 'Object storage has no write key on this machine, so it is skipped on every run. Add one under Destinations to include it.'
+    };
+  }
+}
+</script>
+</body>
+</html>

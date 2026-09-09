@@ -1,0 +1,2101 @@
+<!-- design-canvas — the pane.
+     A live Claude Design canvas, seeded on disk by this component's service and
+     delivered to the browser through GET /api/components/<payload_component>
+     (CONTRACT §7). This file renders the chrome, the frame, the pin overlay and
+     one screen per state; it never carries canvas bytes itself.
+
+     BYTE BUDGET: **at most 128 KB**, half the hard 256 KB tripwire ceiling
+     (CONTRACT §8.4). It is ~96 KB today: ~18 KB of style and markup, 13 KB that
+     is the verbatim inline of `scratch/anchor-lib.js` (a component installs
+     exactly four files, so the pane cannot import it — CONTRACT §1.2/§5.1), and
+     the rest this script. What actually matters is not the number but the rule
+     behind it: the 2.4 MB canvas is NOT in this file and must never be. Pane
+     `html` is snapshotted into every committed graph node, so a payload here
+     would be copied into every node on disk, forever (FINDINGS §8). It arrives
+     at runtime, over fetch, and goes straight into an iframe's `srcdoc`.
+
+     Two failure modes kill a pane silently; both are avoided here:
+       - the script body is compiled as `new Function('store','root','params','mountId', body)`
+         (`public/mount-runtime.js:95-105`), so top-level `await` is a SyntaxError
+         and the pane never runs. Every `await` here sits inside an async
+         function — the IIFE in run(), or an async event handler.
+       - `document.querySelector` cannot see into the shadow root. Every query
+         goes through `root`. `document.createElement` is fine and is used
+         throughout in preference to innerHTML, because much of what is rendered
+         here came out of a canvas the pane does not trust (CONTRACT §9.3).
+-->
+<style>
+  /* Every colour is a --wc-* token with a fallback, so a theme swap carries the
+     whole pane. The canvas inside the frame paints itself and is NOT themeable
+     from here — it hardcodes its own palette. */
+  .dc { font-family: var(--wc-font, system-ui, -apple-system, "Segoe UI", sans-serif);
+        color: var(--wc-fg, #1a1a1a); font-size: 13px; line-height: 1.45;
+        display: flex; flex-direction: column; padding: 0 0 6px;
+        --dc-alert: var(--wc-gold, #b8860b);
+        --dc-alert-ink: #8a6410;
+        --dc-alert-ink: color-mix(in oklab, var(--wc-gold, #b8860b) 55%, var(--wc-fg, #1a1a1a));
+        --dc-bad: #b3382a;
+        --dc-bad: color-mix(in oklab, #cf4130 55%, var(--wc-fg, #1a1a1a)); }
+  /* An author `display` beats the UA sheet's [hidden] rule, so el.hidden would
+     be a no-op on every flex/grid box below without this. */
+  .dc [hidden] { display: none !important; }
+
+  .dc-head { padding: 11px 13px 0; display: flex; flex-direction: column; gap: 7px; }
+  .dc-idrow { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .dc-mark { display: inline-flex; color: var(--wc-accent, #4a6fa5); }
+  .dc-title { font-size: 13.5px; font-weight: 650; letter-spacing: -.01em;
+              overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 320px; }
+  .dc-sp { flex: 1 1 auto; }
+  .dc-sub { font-size: 11.5px; color: var(--wc-muted, #77777f); display: flex;
+            gap: 5px; flex-wrap: wrap; align-items: baseline; }
+  .dc-sub b { font-weight: 600; color: var(--wc-fg, #1a1a1a); }
+
+  .dc-badge { font-size: 9.5px; font-weight: 700; letter-spacing: .085em; text-transform: uppercase;
+              border: 1px solid var(--wc-border, #e2e2e6); border-radius: 20px; padding: 1px 7px;
+              color: var(--wc-muted, #77777f); white-space: nowrap; cursor: help; }
+  .dc-badge.ok   { color: var(--wc-green, #3f8f5f); border-color: color-mix(in oklab, var(--wc-green, #3f8f5f) 45%, transparent); }
+  .dc-badge.work { color: var(--wc-accent, #4a6fa5); border-color: color-mix(in oklab, var(--wc-accent, #4a6fa5) 45%, transparent); }
+  .dc-badge.bad  { color: var(--dc-bad); border-color: color-mix(in oklab, var(--dc-bad) 45%, transparent); }
+
+  .dc-btn { font-family: inherit; font-size: 12px; line-height: 1.3; padding: 4px 10px;
+            border-radius: var(--wc-radius-sm, 5px); border: 1px solid var(--wc-border, #e2e2e6);
+            background: var(--wc-panel-bg, #f7f7f8); color: var(--wc-fg, #1a1a1a);
+            cursor: pointer; white-space: nowrap; display: inline-flex; align-items: center; gap: 5px; }
+  .dc-btn:hover:not(:disabled) { border-color: var(--wc-accent, #4a6fa5); }
+  .dc-btn:disabled { opacity: .45; cursor: default; }
+  .dc-btn-s { font-size: 11.5px; padding: 2px 8px; }
+  .dc-btn-go { border-color: var(--wc-accent, #4a6fa5); color: var(--wc-accent-dark, #2f4a6d); font-weight: 600; }
+  .dc-btn.on { border-color: var(--dc-alert); color: var(--dc-alert-ink); font-weight: 650;
+               background: color-mix(in oklab, var(--dc-alert) 14%, var(--wc-panel-bg, #f7f7f8)); }
+
+  .dc-flash { font-size: 11.5px; color: var(--wc-accent-dark, #2f4a6d); }
+  .dc-flash.bad { color: var(--dc-bad); }
+
+  /* ── banners ─────────────────────────────────────────────────────────── */
+  .dc-banner { display: flex; flex-direction: column; gap: 6px; }
+  .dc-bn { display: flex; gap: 8px; align-items: flex-start; font-size: 12px;
+           border: 1px solid var(--wc-border, #e2e2e6); border-left: 3px solid var(--wc-muted, #77777f);
+           border-radius: var(--wc-radius-sm, 5px); padding: 7px 10px;
+           background: var(--wc-panel-bg, #f7f7f8); }
+  .dc-bn.warn { border-left-color: var(--dc-alert); }
+  .dc-bn.bad  { border-left-color: var(--dc-bad); }
+  .dc-bn .dc-ic { margin-top: 2px; flex: none; color: var(--wc-muted, #77777f); }
+  .dc-bn.warn .dc-ic { color: var(--dc-alert); }
+  .dc-bn.bad .dc-ic  { color: var(--dc-bad); }
+  .dc-bn code, .dc-mono { font-family: var(--wc-mono, ui-monospace, Menlo, monospace); font-size: 11.5px; }
+  .dc-bn code { background: var(--wc-bg, #fff); border: 1px solid var(--wc-border-light, #efeff2);
+                border-radius: 4px; padding: 0 4px; overflow-wrap: anywhere; }
+
+  /* ── ask + files panels ──────────────────────────────────────────────── */
+  .dc-panel { border: 1px solid var(--wc-border, #e2e2e6); border-radius: var(--wc-radius, 8px);
+              background: var(--wc-panel-bg, #f7f7f8); padding: 10px 12px; }
+  .dc-panel.go { border-color: var(--wc-accent, #4a6fa5); }
+  .dc-panel h4 { margin: 0 0 3px; font-size: 12.5px; font-weight: 650; }
+  .dc-what { font-size: 11.5px; color: var(--wc-muted, #77777f); margin-bottom: 7px;
+             font-family: var(--wc-mono, ui-monospace, Menlo, monospace); overflow-wrap: anywhere; }
+  .dc-ta { width: 100%; box-sizing: border-box; font-family: inherit; font-size: 12.5px;
+           min-height: 56px; resize: vertical; padding: 6px 8px; color: var(--wc-fg, #1a1a1a);
+           background: var(--wc-bg, #fff); border: 1px solid var(--wc-border, #e2e2e6);
+           border-radius: var(--wc-radius-sm, 5px); }
+  .dc-ta:focus { outline: none; border-color: var(--wc-accent, #4a6fa5); }
+  .dc-row { display: flex; align-items: center; gap: 8px; margin-top: 7px; flex-wrap: wrap; }
+  .dc-lab { font-size: 11.5px; color: var(--wc-muted, #77777f); display: inline-flex;
+            align-items: center; gap: 5px; }
+  .dc-sel { font-family: inherit; font-size: 12px; padding: 2px 5px; max-width: 220px;
+            border: 1px solid var(--wc-border, #e2e2e6); border-radius: var(--wc-radius-sm, 5px);
+            background: var(--wc-bg, #fff); color: var(--wc-fg, #1a1a1a); }
+  .dc-fine { font-size: 11px; color: var(--wc-muted, #77777f); }
+  /* Fine print that is a WARNING, not an aside — e.g. "dsn_ask is not declared
+     on this mount, so nothing you write here reaches the queue rail". */
+  .dc-warn-fine { color: var(--dc-alert-ink); }
+
+  .dc-flist { display: grid; grid-template-columns: minmax(0,1fr) auto auto; gap: 1px 12px;
+              font-family: var(--wc-mono, ui-monospace, Menlo, monospace); font-size: 11.5px; }
+  .dc-flist .n { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .dc-flist .v { color: var(--wc-muted, #77777f); font-variant-numeric: tabular-nums; text-align: right; }
+
+  /* ── stage ───────────────────────────────────────────────────────────── */
+  .dc-stage { padding: 10px 13px 0; min-width: 0; }
+  /* resize:vertical is the whole height story — a canvas is never the right
+     height by default, and there is no `height` param in CONTRACT §1.1. */
+  .dc-wrap { position: relative; width: 100%; height: 62vh; min-height: 300px;
+             resize: vertical; overflow: hidden;
+             border: 1px solid var(--wc-border, #e2e2e6); border-radius: var(--wc-radius, 8px);
+             background: var(--wc-bg, #fff); }
+  .dc-wrap iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0;
+                    display: block; background: var(--wc-bg, #fff); }
+
+  /* The overlay is inert until armed. Armed, it swallows every pointer event —
+     which is exactly why arming is explicit, loud, and one keystroke to leave:
+     while it is on, the canvas cannot be panned, zoomed or selected. */
+  .dc-ov { position: absolute; inset: 0; pointer-events: none; }
+  .dc-ov.armed { pointer-events: auto; cursor: crosshair;
+                 background: color-mix(in oklab, var(--dc-alert) 7%, transparent);
+                 box-shadow: inset 0 0 0 2px var(--dc-alert); }
+  .dc-armbar { position: absolute; left: 0; right: 0; top: 0; z-index: 6; display: flex;
+               align-items: center; gap: 8px; flex-wrap: wrap; padding: 6px 9px; font-size: 11.5px;
+               color: var(--wc-bg, #fff); background: var(--dc-alert-ink);
+               pointer-events: auto; }
+  .dc-armbar b { font-weight: 700; }
+  .dc-armbar .dc-btn { background: transparent; color: inherit; border-color: currentColor; }
+
+  .dc-mk { position: absolute; z-index: 5; pointer-events: auto; width: 17px; height: 17px;
+           margin: -17px 0 0 -8px; border-radius: 50% 50% 50% 2px;
+           border: 1px solid var(--wc-bg, #fff); cursor: pointer;
+           background: var(--wc-accent, #4a6fa5); color: var(--wc-bg, #fff);
+           display: flex; align-items: center; justify-content: center;
+           font-size: 9.5px; font-weight: 700; box-shadow: var(--wc-shadow, 0 1px 5px rgba(0,0,0,.28)); }
+  .dc-mk.priv { background: var(--wc-muted, #77777f); }
+  .dc-mk.rep  { background: var(--wc-green, #3f8f5f); }
+  .dc-mk.drift { border-style: dashed; border-color: var(--dc-alert); }
+  .dc-mk:focus-visible { outline: 2px solid var(--dc-alert); outline-offset: 2px; }
+
+  .dc-dock { position: absolute; right: 7px; bottom: 7px; z-index: 5; display: flex;
+             flex-direction: column; align-items: flex-end; gap: 4px; max-width: 62%;
+             pointer-events: none; }
+  .dc-dock-h { font-size: 10px; color: var(--wc-muted, #77777f); background: var(--wc-bg, #fff);
+               border: 1px solid var(--wc-border, #e2e2e6); border-radius: 20px; padding: 0 7px;
+               pointer-events: auto; cursor: help; }
+  .dc-dk { display: inline-flex; align-items: center; gap: 5px; max-width: 100%;
+           font-family: inherit; font-size: 11px; text-align: left; cursor: pointer;
+           padding: 2px 8px 2px 5px; border-radius: 20px; pointer-events: auto;
+           border: 1px solid var(--wc-border, #e2e2e6); background: var(--wc-bg, #fff);
+           color: var(--wc-fg, #1a1a1a); box-shadow: var(--wc-shadow, 0 1px 5px rgba(0,0,0,.12)); }
+  .dc-dk:hover { border-color: var(--wc-accent, #4a6fa5); }
+  .dc-dk .t { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .dc-dot { width: 7px; height: 7px; border-radius: 50%; flex: none; background: var(--wc-accent, #4a6fa5); }
+  .dc-dot.priv { background: var(--wc-muted, #77777f); }
+  .dc-dot.rep { background: var(--wc-green, #3f8f5f); }
+
+  .dc-pop { position: absolute; z-index: 7; width: 268px; max-width: calc(100% - 16px);
+            pointer-events: auto; padding: 9px 11px;
+            border: 1px solid var(--wc-border, #e2e2e6); border-radius: var(--wc-radius, 8px);
+            background: var(--wc-bg, #fff); box-shadow: var(--wc-shadow, 0 3px 14px rgba(0,0,0,.16)); }
+  .dc-pop-h { font-size: 11px; color: var(--wc-muted, #77777f); margin-bottom: 5px;
+              display: flex; align-items: baseline; gap: 5px; }
+  .dc-pop-h .a { font-family: var(--wc-mono, ui-monospace, Menlo, monospace);
+                 overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .dc-pop-t { font-size: 12.5px; white-space: pre-wrap; overflow-wrap: anywhere;
+              max-height: 130px; overflow: auto; }
+  .dc-pop-r { font-size: 12px; border-top: 1px solid var(--wc-border-light, #efeff2);
+              padding-top: 5px; margin-top: 5px; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .dc-pop-r i { font-style: normal; color: var(--wc-muted, #77777f); font-size: 10.5px;
+                text-transform: uppercase; letter-spacing: .06em; margin-right: 5px; }
+
+  /* ── state screens ───────────────────────────────────────────────────── */
+  .dc-screen { max-width: 640px; margin: 0 auto; padding: 22px 6px 26px; text-align: center; }
+  .dc-screen.left { text-align: left; max-width: 720px; }
+  .dc-screen .dc-ic-b { width: 26px; height: 26px; stroke-width: 1.2; color: var(--wc-muted, #77777f); }
+  .dc-screen.warn .dc-ic-b { color: var(--dc-alert); }
+  .dc-screen.bad .dc-ic-b  { color: var(--dc-bad); }
+  .dc-h { font-size: 15px; font-weight: 650; margin: 9px 0 5px; letter-spacing: -.01em; }
+  .dc-p { font-size: 12.5px; color: var(--wc-muted, #77777f); margin: 0 0 10px; }
+  .dc-p b { color: var(--wc-fg, #1a1a1a); font-weight: 600; }
+  .dc-pre { font-family: var(--wc-mono, ui-monospace, Menlo, monospace); font-size: 11.5px;
+            white-space: pre-wrap; overflow-wrap: anywhere; text-align: left;
+            max-height: 260px; overflow: auto;
+            background: var(--wc-panel-bg, #f7f7f8); border: 1px solid var(--wc-border-light, #efeff2);
+            border-radius: var(--wc-radius-sm, 5px); padding: 8px 10px; margin: 0 0 10px; }
+  .dc-btns { display: flex; gap: 8px; justify-content: center; flex-wrap: wrap; margin-top: 4px; }
+  .dc-screen.left .dc-btns { justify-content: flex-start; }
+  .dc-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+              gap: 7px; text-align: left; margin: 0 0 12px; }
+  .dc-card { border: 1px solid var(--wc-border, #e2e2e6); border-radius: var(--wc-radius-sm, 5px);
+             background: var(--wc-panel-bg, #f7f7f8); padding: 7px 9px; }
+  .dc-card .n { font-size: 12px; font-weight: 600; overflow: hidden;
+                text-overflow: ellipsis; white-space: nowrap; }
+  .dc-card .m { font-size: 10.5px; color: var(--wc-muted, #77777f);
+                font-family: var(--wc-mono, ui-monospace, Menlo, monospace); }
+  .dc-bar { height: 3px; border-radius: 3px; overflow: hidden; margin: 0 0 12px;
+            background: var(--wc-border-light, #efeff2); }
+  .dc-bar i { display: block; height: 100%; width: 34%; border-radius: 3px;
+              background: var(--wc-accent, #4a6fa5); animation: dc-slide 1.25s ease-in-out infinite; }
+  @keyframes dc-slide { 0% { margin-left: -34%; } 100% { margin-left: 100%; } }
+  @media (prefers-reduced-motion: reduce) { .dc-bar i { animation: none; width: 100%; opacity: .5; } }
+
+  .dc-ic { width: 13px; height: 13px; flex: none; fill: none; stroke: currentColor;
+           stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+  .dc-vh { position: absolute; width: 1px; height: 1px; margin: -1px; overflow: hidden;
+           clip-path: inset(50%); white-space: nowrap; border: 0; }
+  @media (max-width: 560px) {
+    .dc-head { padding: 9px 10px 0; }
+    .dc-stage { padding: 8px 10px 0; }
+    .dc-title { max-width: 180px; }
+  }
+</style>
+
+<div class="dc">
+  <header class="dc-head">
+    <div class="dc-idrow">
+      <span class="dc-mark" data-mark></span>
+      <span class="dc-title" data-title>Design canvas</span>
+      <span class="dc-badge" data-badge title="Canvas state">waiting</span>
+      <span class="dc-flash" data-flash></span>
+      <span class="dc-sp"></span>
+      <button class="dc-btn dc-btn-s" data-pin type="button">Pin mode</button>
+      <button class="dc-btn dc-btn-s" data-files type="button">Files</button>
+      <button class="dc-btn dc-btn-s" data-reseed type="button">Reseed</button>
+      <button class="dc-btn dc-btn-s dc-btn-go" data-ask-toggle type="button">Ask Claude</button>
+    </div>
+    <div class="dc-sub" data-sub></div>
+    <div class="dc-banner" data-banner hidden></div>
+
+    <div class="dc-panel" data-filespanel hidden></div>
+
+    <div class="dc-panel go" data-ask hidden>
+      <h4>Ask Claude about this canvas</h4>
+      <div class="dc-what" data-ask-what></div>
+      <div class="dc-row" style="margin: 0 0 6px">
+        <label class="dc-lab">About
+          <!-- data-no-persist: its options are rebuilt from live data on every
+               paint, so a captured index would rehydrate onto the wrong option —
+               and excluding it keeps the ask note's form_state key stable. -->
+          <select class="dc-sel" data-ask-artboard data-no-persist aria-label="Artboard this note is about"></select>
+        </label>
+      </div>
+      <textarea class="dc-ta" id="dsn-ask-note" name="dsn_ask_note" maxlength="2000"
+                placeholder="e.g. the pricing artboard's CTA is too quiet next to the header"></textarea>
+      <div class="dc-row">
+        <button class="dc-btn dc-btn-go" data-ask-send type="button">Send to Claude</button>
+        <button class="dc-btn" data-ask-cancel type="button">Cancel</button>
+        <span class="dc-fine" data-ask-fine></span>
+      </div>
+    </div>
+  </header>
+
+  <div class="dc-stage" data-stage>
+    <div class="dc-screen"><div class="dc-p">Starting the design-canvas pane…</div></div>
+  </div>
+</div>
+<script>
+  /* Injected globals: store, root, params, mountId. This pane lives in a shadow
+     root — never document.querySelector / getElementById.
+
+     Compiled as `new Function('store','root','params','mountId', body)`, so
+     nothing below may use top-level `await`, `import` or `export`. */
+
+  /* The anchor library, copied VERBATIM from `scratch/anchor-lib.js`.
+
+     A component installs exactly four files (CONTRACT §1.2, §9.4) and a pane
+     script has no module system (CONTRACT §5.1), so the library cannot be
+     imported and this is a copy. That file is the source of truth: edit it
+     there, re-run `node --test test/uc-port.test.mjs` — which proves the port
+     byte-identical to the payload's own `Uc`/`ZP`/`QP` and compiles the file
+     exactly the way this pane is compiled — then re-inline it here. The two
+     marker lines below delimit the copy; how to extract and diff it is written
+     at the end marker. */
+  /* @@ANCHOR-LIB-BEGIN@@ */
+// ---------------------------------------------------------------------------
+// anchor-lib — the anchor grammar of Claude Design's canvas editor, ported.
+//
+// SOURCE OF TRUTH. THIS FILE IS INLINED, NOT IMPORTED.
+//
+// A web-chat component installs exactly four files (CONTRACT §1.2, §9.4), so
+// `component.html` cannot `import` a helper from this repo. The pane script is
+// compiled as `new Function('store','root','params','mountId', body)`
+// (CONTRACT §5.1), which has no module system at all. So this file is the
+// authoritative copy and its body is COPIED verbatim into the pane script.
+// Edit it here, re-run `node --test test/uc-port.test.mjs`, then re-inline.
+//
+// Constraints this file is written to satisfy, so the copy is mechanical:
+//   - no `import` / `export` / top-level `await` — it must compile as the body
+//     of a `new Function(...)`, where any of those is a SyntaxError that fails
+//     near-silently (CONTRACT §5.1).
+//   - exactly one identifier leaks into the pane scope: `DsnAnchor`.
+//   - no `document.*` — nothing here touches the DOM.
+//   - the trailing `module.exports` line is guarded and is inert in a pane
+//     (`typeof module` is 'undefined' there); it exists only so Node tooling
+//     can require this file directly.
+//
+// PROVENANCE. Every constant and every function below is a port of a named
+// symbol in Claude Design's `payload.template.html`, read from the user's own
+// local install. No upstream bytes are reproduced here beyond the short
+// expressions the port necessarily restates (CONTRACT §9.1). The port is
+// proven byte-identical to the payload's own implementation by
+// `test/uc-port.test.mjs`, which extracts the payload's version at test time
+// from the LOCAL install and never from a committed copy (CONTRACT §8.2).
+// If that test fails, this file is wrong — not the test.
+//
+// Upstream symbol map (minified names as of Claude Code 2.1.263 /
+// payload sha256 76a2b0a4…; the names are minifier output and WILL churn, so
+// the test locates them by shape, never by name):
+//
+//   Uc   → fileHash12          cyrb53, low 12 hex digits of the 53-bit value
+//   ZP   → fraction4           round(clamp01(v) * 9999), zero-padded to 4
+//   JP   → fractionFrom4       Number(s) / 9999
+//   QP   → anchorSegment       (kind, payload) => "dc"+kind+payload+":nth-of-type(1)"
+//   dE   → artboardAnchor      the mint site, artboard branch
+//   fE   → parseArtboardAnchor the parse site, artboard branch
+//   Die  → FINAL_SEGMENT_RE
+//   _ie  → PLAIN_SEGMENT_RE
+//   Aie  → ID_SEGMENT_RE
+//   Pie  → NTH_OF_TYPE (1)
+//   ZCe  → FILE_HASH_HEX (12)
+//   Oie  → MAX_ANCHOR_SEGMENTS (10)
+//
+// WHAT THIS FILE IS NOT. It does not sanitise `anchor.text`. CONTRACT §4.4
+// caps the label at 60 characters and forbids deriving it from frame DOM text;
+// that is the pane's job at the call site, because the label is untrusted input
+// from inside the same-origin frame (CONTRACT §9.3) and this module never sees
+// the frame.
+// ---------------------------------------------------------------------------
+
+const DsnAnchor = (function () {
+  // --- constants, all mirrored from the payload -----------------------------
+
+  // ZCe — how many hex digits of the 53-bit hash survive into an anchor.
+  const FILE_HASH_HEX = 12;
+
+  // ZP — a fraction is stored as an integer 0…9999, zero-padded to 4 digits.
+  const FRACTION_SCALE = 9999;
+  const FRACTION_DIGITS = 4;
+
+  // Pie — the payload mints every synthetic segment with this index and its
+  // parser REFUSES any other value, so it is a constant and not a parameter.
+  const NTH_OF_TYPE = 1;
+
+  // The four anchor kinds the payload's grammar admits. v0.1.0 mints only 'a'.
+  const KIND_ELEMENT = 'e';
+  const KIND_ARTBOARD = 'a';
+  const KIND_NOTE = 'n';
+  const KIND_CANVAS_POINT = 'c';
+
+  // CONTRACT §4.3 / payload dE + fE. The web-chat server stores `anchor`
+  // verbatim with zero validation, so this is the only gate there is.
+  const SEGMENT_SEPARATOR = ' > ';
+  const MAX_ANCHOR_LENGTH = 1024;
+  const MAX_ANCHOR_SEGMENTS = 10; // Oie
+
+  // Die — the final segment of any valid anchor.
+  const FINAL_SEGMENT_RE =
+    /^dc([eanc])([0-9a-z]*):nth-of-type\(([1-9][0-9]{0,3})\)$/;
+  // _ie — every other segment (a plain synthetic CSS type selector).
+  const PLAIN_SEGMENT_RE = /^[a-z][a-z0-9-]{0,23}:nth-of-type\([1-9][0-9]{0,3}\)$/;
+  // Aie — segment 0 only may instead be an id selector.
+  const ID_SEGMENT_RE = /^#[A-Za-z_][A-Za-z0-9_-]{0,31}$/;
+
+  // The payload's own read-back shape for the 'e' and 'a' kinds:
+  // 12 hex of file hash, then two 4-digit fractions.
+  const HASH_AND_FRACTIONS_RE = /^([0-9a-f]{12})([0-9]{4})([0-9]{4})$/;
+
+  // --- fileHash12 (payload `Uc`) --------------------------------------------
+  //
+  // cyrb53 with seed 0, truncated. The payload hashes the artboard's FILE PATH
+  // with this and splices the 12 hex digits into the anchor.
+  //
+  // Every step is byte-load-bearing and none of it may be "cleaned up":
+  //  - the two seeds are 0xdeadbeef and 0x41c6ce57, written the way the
+  //    payload writes them (0xdeadbeef as a signed 32-bit int);
+  //  - `Math.imul` is what makes the multiplies 32-bit — plain `*` overflows
+  //    into float and silently produces a different hash;
+  //  - the finalisation assigns h1 FIRST and h2 then reads the NEW h1;
+  //  - the value is a 53-bit safe integer, so `toString(16)` is exact;
+  //  - `padStart(14, '0')` then `slice(-12)` keeps the LOW 12 hex digits,
+  //    i.e. the low 48 bits — it is a truncation, not a re-hash;
+  //  - iteration is over UTF-16 CODE UNITS (`charCodeAt`), so an astral
+  //    character contributes its two surrogates. Do not "fix" this to
+  //    code points: it would break equivalence with the payload.
+  //
+  // Strictness added deliberately: the payload would accept a non-string and
+  // quietly hash the empty string (`(5).length` is undefined, so its loop never
+  // runs). An anchor is durable data, so a non-string here is a caller bug and
+  // is thrown rather than encoded.
+  function fileHash12(text) {
+    if (typeof text !== 'string') {
+      throw new TypeError('fileHash12 expects a string, got ' + typeof text);
+    }
+    let h1 = -559038737; // 0xdeadbeef as a signed 32-bit integer
+    let h2 = 1103547991; // 0x41c6ce57
+    for (let i = 0; i < text.length; i++) {
+      const code = text.charCodeAt(i);
+      h1 = Math.imul(h1 ^ code, 2654435761);
+      h2 = Math.imul(h2 ^ code, 1597334677);
+    }
+    h1 =
+      Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^
+      Math.imul(h2 ^ (h2 >>> 13), 3266489909);
+    h2 =
+      Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^
+      Math.imul(h1 ^ (h1 >>> 13), 3266489909);
+    // 4294967296 === 2 ** 32; 2097151 === 2 ** 21 - 1. Together: 53 bits.
+    const value = 4294967296 * (2097151 & h2) + (h1 >>> 0);
+    return value.toString(16).padStart(14, '0').slice(-FILE_HASH_HEX);
+  }
+
+  // --- fraction4 (payload `ZP`) ---------------------------------------------
+  //
+  // CONTRACT §4.2 states this as `String(Math.round(clamp01(v) * 9999)).padStart(4,'0')`
+  // and leaves the non-finite case open. The payload closes it: a non-finite
+  // value becomes 0.5 (the artboard centre) BEFORE the clamp. That matters —
+  // clamping NaN yields NaN, and `String(Math.round(NaN)).padStart(4,'0')` is
+  // the literal string "0NaN", which would mint an anchor the payload's own
+  // parser rejects. This port keeps the payload's guard.
+  //
+  // Note `Number.isFinite` is not coercing: the string "0.5" is NOT finite by
+  // it and falls back to the 0.5 default. That is the payload's behaviour and
+  // is reproduced exactly; pass numbers.
+  function fraction4(value) {
+    const finite = Number.isFinite(value) ? value : 0.5;
+    const clamped = Math.min(1, Math.max(0, finite));
+    return String(Math.round(clamped * FRACTION_SCALE)).padStart(
+      FRACTION_DIGITS,
+      '0',
+    );
+  }
+
+  // JP — the inverse, for reading an anchor back. Lossy by design: the round
+  // trip is exact only to 1/9999.
+  function fractionFrom4(digits) {
+    return Number(digits) / FRACTION_SCALE;
+  }
+
+  // --- anchor construction (payload `QP`, and the artboard branch of `dE`) ---
+
+  function anchorSegment(kind, payload) {
+    return 'dc' + kind + payload + ':nth-of-type(' + String(NTH_OF_TYPE) + ')';
+  }
+
+  // `dca<fileHash12><fx4><fy4>:nth-of-type(1)` — CONTRACT §4.2.
+  //
+  // `filePath` is the artboard's file path exactly as the canvas knows it
+  // (e.g. "Pricing.dc.html"); fx/fy are fractions of the artboard box.
+  // Returns null rather than an invalid string if validation fails, mirroring
+  // the payload's own mint site, which also ends in a validate-or-null.
+  function artboardAnchor(filePath, fx, fy) {
+    const anchor = anchorSegment(
+      KIND_ARTBOARD,
+      fileHash12(filePath) + fraction4(fx) + fraction4(fy),
+    );
+    return validateAnchor(anchor, { strict: true }).ok ? anchor : null;
+  }
+
+  // --- validation (CONTRACT §4.3) -------------------------------------------
+  //
+  // Applies in BOTH directions: to anything minted here before it becomes
+  // durable data, and to anything read back out of an anchor store. The
+  // web-chat server stores `anchor` verbatim with zero validation and
+  // `describeAnchor` does not truncate `selector`, so an unbounded or malformed
+  // anchor read from the frame would flow straight into Claude's context.
+  // An invalid anchor is DROPPED, never stored.
+  //
+  // Default mode is exactly the three rules CONTRACT §4.3 names.
+  // `{ strict: true }` additionally applies the payload's own per-segment
+  // grammar (`_ie`, with `Aie` allowed at index 0), which is what the payload's
+  // mint site enforces on itself.
+  function validateAnchor(anchor, options) {
+    const strict = !!(options && options.strict);
+    if (typeof anchor !== 'string') {
+      return { ok: false, reason: 'anchor is not a string' };
+    }
+    if (anchor === '') {
+      return { ok: false, reason: 'anchor is empty' };
+    }
+    if (anchor.length > MAX_ANCHOR_LENGTH) {
+      return {
+        ok: false,
+        reason:
+          'anchor is ' +
+          anchor.length +
+          ' chars, over the ' +
+          MAX_ANCHOR_LENGTH +
+          '-char limit',
+      };
+    }
+    const segments = anchor.split(SEGMENT_SEPARATOR);
+    if (segments.length > MAX_ANCHOR_SEGMENTS) {
+      return {
+        ok: false,
+        reason:
+          'anchor has ' +
+          segments.length +
+          ' segments, over the limit of ' +
+          MAX_ANCHOR_SEGMENTS,
+      };
+    }
+    const last = segments[segments.length - 1];
+    const match = FINAL_SEGMENT_RE.exec(last);
+    if (!match) {
+      return {
+        ok: false,
+        reason: 'final segment does not match the anchor grammar',
+      };
+    }
+    if (Number(match[3]) !== NTH_OF_TYPE) {
+      return {
+        ok: false,
+        reason:
+          'final segment is :nth-of-type(' +
+          match[3] +
+          '); the grammar admits only ' +
+          NTH_OF_TYPE,
+      };
+    }
+    if (strict) {
+      for (let i = 0; i < segments.length; i++) {
+        const segment = segments[i];
+        const okSegment =
+          PLAIN_SEGMENT_RE.test(segment) ||
+          (i === 0 && ID_SEGMENT_RE.test(segment));
+        if (!okSegment) {
+          return { ok: false, reason: 'segment ' + i + ' is not a valid selector' };
+        }
+      }
+    }
+    return { ok: true, reason: null, kind: match[1], payload: match[2] };
+  }
+
+  function isValidAnchor(anchor, options) {
+    return validateAnchor(anchor, options).ok;
+  }
+
+  // --- read-back (the artboard branch of payload `fE`) ----------------------
+  //
+  // Returns { fileHash12, fx, fy } for a canonical single-segment artboard
+  // anchor, else null. Deliberately narrow: v0.1.0 mints only 'a' anchors, and
+  // anything else read out of a store is not ours and is not decoded here.
+  function parseArtboardAnchor(anchor) {
+    const check = validateAnchor(anchor);
+    if (!check.ok) return null;
+    if (check.kind !== KIND_ARTBOARD) return null;
+    if (anchor.split(SEGMENT_SEPARATOR).length !== 1) return null;
+    const parts = HASH_AND_FRACTIONS_RE.exec(check.payload);
+    if (!parts) return null;
+    return {
+      kind: KIND_ARTBOARD,
+      fileHash12: parts[1],
+      fx: fractionFrom4(parts[2]),
+      fy: fractionFrom4(parts[3]),
+      fx4: parts[2],
+      fy4: parts[3],
+    };
+  }
+
+  return {
+    FILE_HASH_HEX,
+    FRACTION_SCALE,
+    FRACTION_DIGITS,
+    NTH_OF_TYPE,
+    KIND_ELEMENT,
+    KIND_ARTBOARD,
+    KIND_NOTE,
+    KIND_CANVAS_POINT,
+    SEGMENT_SEPARATOR,
+    MAX_ANCHOR_LENGTH,
+    MAX_ANCHOR_SEGMENTS,
+    FINAL_SEGMENT_RE,
+    PLAIN_SEGMENT_RE,
+    ID_SEGMENT_RE,
+    fileHash12,
+    fraction4,
+    fractionFrom4,
+    anchorSegment,
+    artboardAnchor,
+    validateAnchor,
+    isValidAnchor,
+    parseArtboardAnchor,
+  };
+})();
+
+// Inert in a pane (`typeof module` is 'undefined' under `new Function`);
+// present only so Node tooling can require this file without a build step.
+if (typeof module === 'object' && module !== null && module.exports) {
+  module.exports = DsnAnchor;
+}
+  /* @@ANCHOR-LIB-END@@ */
+  /* Extract the copy above and diff it against its source:
+       awk '/@@ANCHOR-LIB-BEGIN@@/{f=1;next} /@@ANCHOR-LIB-END@@/{exit} f' \
+         components/design-canvas/component.html | diff - scratch/anchor-lib.js
+     The `exit` is what stops this very comment from re-opening the range. The
+     library's trailing `module.exports` guard is inert under `new Function`
+     (`typeof module` is 'undefined' there) and is kept so that diff stays
+     clean. */
+
+  // ── context ─────────────────────────────────────────────────────────────
+  const A = DsnAnchor;
+  const P = params || {};
+  const $ = (sel) => root.querySelector(sel);
+  const TRUST = 'claude-web-chat trust design-canvas';
+
+  // Node preview / glance card: previews are served with `default-src 'none'`,
+  // no `frame-src` and `connect-src 'none'` (lib/core/cors.js PREVIEW_CSP), so
+  // BOTH the frame and the fetch are dead there. Detected up front, because an
+  // empty box would be indistinguishable from a broken pane.
+  const IS_PREVIEW = (() => {
+    try { return String(location.pathname || '').indexOf('/preview/') === 0; } catch (e) { return false; }
+  })();
+  // The canvas needs a SECURE context, not merely a local one: off one,
+  // crypto.randomUUID is undefined, the artboard handshake throws unguarded and
+  // the editor hangs on a permanent spinner with its toolbar drawn
+  // (FINDINGS §5). Checked BEFORE the frame is ever created.
+  const SECURE = (() => { try { return window.isSecureContext !== false; } catch (e) { return true; } })();
+  const ORIGIN = (() => { try { return String(location.origin || ''); } catch (e) { return ''; } })();
+  const ISOLATE = P.isolate === true || P.isolate === 'true';
+
+  // Is `dsn_ask` actually DECLARED on this mount (CONTRACT §2.4)? The wake
+  // registry is derived from `mount.params.signals`
+  // (lib/server/domain/signals.js parseSignals), and this pane is handed those
+  // same params verbatim (public/app/mounts.js:619 passes the mount's `params`
+  // straight into runScripts). So the pane can read its own declaration.
+  //
+  // It matters because of the OTHER param: with `routing:'none'` (CONTRACT §1.1,
+  // and what params_schema defaults to) the activity safety net is off too
+  // (signals.js deriveRouting), so an undeclared `dsn_ask` write reaches
+  // absolutely nothing — no queue item, no activity item, no wake. Telling the
+  // user "queued, hit Push" in that case is a lie the surface then confirms by
+  // showing an empty rail. A drawer spawn through the form-renderer CANNOT carry
+  // signals (public/app/drawer.js:440 spawns with the form values alone), so this
+  // is a reachable state, not a theoretical one.
+  const ASK_DECLARED = (() => {
+    try {
+      const sigs = P.signals;
+      if (!Array.isArray(sigs)) return false;
+      for (const x of sigs) if (x && x.key === 'dsn_ask') return true;
+      return false;
+    } catch (e) { return false; }
+  })();
+  const ASK_UNDECLARED_WHY =
+    'This pane was mounted without dsn_ask declared as a signal, so the note is written to the store '
+    + 'but does NOT reach the queue rail. Ask Claude to re-mount design-canvas with '
+    + 'signals: [{ key: "dsn_ask", wake: "queue" }] — or just say it in chat.';
+
+  // ── tiny dom helpers (createElement everywhere; no innerHTML) ────────────
+  function el(tag, cls, text) {
+    const n = document.createElement(tag);
+    if (cls) n.className = cls;
+    if (text != null) n.textContent = String(text);
+    return n;
+  }
+  function btn(cls, text) { const b = el('button', cls, text); b.type = 'button'; return b; }
+  function s(v) { return v == null ? '' : String(v); }
+  function arr(v) { return Array.isArray(v) ? v : []; }
+  function obj(v) { return v && typeof v === 'object' ? v : null; }
+  function num(v) { const n = Number(v); return Number.isFinite(n) ? n : null; }
+
+  const NS = 'http://www.w3.org/2000/svg';
+  // Author-controlled geometry only — nothing here comes out of the canvas.
+  const ICONS = {
+    canvas: [['rect', { x: 2.2, y: 3, width: 5.4, height: 7.2, rx: 1 }],
+             ['rect', { x: 8.9, y: 3, width: 4.9, height: 4.6, rx: 1 }],
+             ['path', { d: 'M2.2 13.4h11.6' }]],
+    pin:    [['path', { d: 'M8 14.2v-4M5.2 3.1h5.6l-.9 3.1 1.7 1.6v1.4H4.4V7.8l1.7-1.6z' }]],
+    warn:   [['path', { d: 'M8 2.7 14.2 13H1.8z' }], ['path', { d: 'M8 6.6v3.1M8 11.4h.01' }]],
+    info:   [['circle', { cx: 8, cy: 8, r: 5.6 }], ['path', { d: 'M8 7.4v3.4M8 5.3h.01' }]],
+    file:   [['path', { d: 'M9 2.5H4.6a1.4 1.4 0 0 0-1.4 1.4v8.2a1.4 1.4 0 0 0 1.4 1.4h6.8a1.4 1.4 0 0 0 1.4-1.4V6.2z' }],
+             ['path', { d: 'M9 2.5v3.7h3.8' }]],
+    off:    [['circle', { cx: 8, cy: 8, r: 5.6 }], ['path', { d: 'M4.4 4.4 11.6 11.6' }]],
+  };
+  function icon(name, cls) {
+    const spec = ICONS[name] || ICONS.info;
+    const svg = document.createElementNS(NS, 'svg');
+    svg.setAttribute('viewBox', '0 0 16 16');
+    svg.setAttribute('class', 'dc-ic' + (cls ? ' ' + cls : ''));
+    svg.setAttribute('aria-hidden', 'true');
+    svg.setAttribute('focusable', 'false');
+    for (const [tag, attrs] of spec) {
+      const n = document.createElementNS(NS, tag);
+      for (const k in attrs) n.setAttribute(k, String(attrs[k]));
+      svg.appendChild(n);
+    }
+    return svg;
+  }
+  // A run of text nodes and small elements: `'plain text'` or `['code', null, 'x']`.
+  function line(parent, parts) {
+    for (const p of arr(parts)) {
+      if (p == null || p === '') continue;
+      if (Array.isArray(p)) parent.appendChild(el(p[0], p[1] || null, p[2]));
+      else parent.appendChild(document.createTextNode(String(p)));
+    }
+    return parent;
+  }
+  function fmtBytes(n) {
+    const v = num(n);
+    if (v == null || v < 0) return '';
+    if (v < 1024) return v + ' B';
+    if (v < 1048576) return (v / 1024).toFixed(v < 10240 ? 1 : 0) + ' KB';
+    return (v / 1048576).toFixed(2) + ' MB';
+  }
+  function relTime(ms) {
+    const n = num(ms);
+    if (n == null || n <= 0) return '';
+    const d = Math.max(0, Date.now() - n);
+    if (d < 45000) return 'just now';
+    if (d < 3600000) return Math.round(d / 60000) + 'm ago';
+    if (d < 86400000) return Math.round(d / 3600000) + 'h ago';
+    return Math.round(d / 86400000) + 'd ago';
+  }
+  const pct = (f) => String(Math.round(Math.min(1, Math.max(0, num(f) == null ? 0 : f)) * 100));
+
+  // Anything read out of the canvas frame is influenceable by canvas content and
+  // must be bounded and stripped before it is shown, stored, or handed to me
+  // (CONTRACT §4.4, §9.3): 60 characters, control characters flattened. Written
+  // as a char-code walk rather than a regex so no escape sequence in this file
+  // can be mangled by a copy or a transport into a class that means something
+  // else.
+  function capFrame(v) {
+    const raw = String(v == null ? '' : v);
+    let out = '';
+    for (let i = 0; i < raw.length && out.length < 60; i++) {
+      const c = raw.charCodeAt(i);
+      out += (c < 32 || c === 127) ? ' ' : raw.charAt(i);
+    }
+    return out.trim().slice(0, 60);
+  }
+
+  // ── elements ────────────────────────────────────────────────────────────
+  const els = {
+    mark: $('[data-mark]'), title: $('[data-title]'), badge: $('[data-badge]'),
+    flash: $('[data-flash]'), sub: $('[data-sub]'), banner: $('[data-banner]'),
+    stage: $('[data-stage]'), files: $('[data-filespanel]'), ask: $('[data-ask]'),
+    askWhat: $('[data-ask-what]'), askNote: $('#dsn-ask-note'), askFine: $('[data-ask-fine]'),
+    askBoard: $('[data-ask-artboard]'),
+    pinBtn: $('[data-pin]'), filesBtn: $('[data-files]'), reseedBtn: $('[data-reseed]'),
+    askBtn: $('[data-ask-toggle]'),
+  };
+  els.mark.appendChild(icon('canvas'));
+  els.askFine.textContent = ASK_DECLARED
+    ? 'Writes the key dsn_ask. Nothing reaches Claude until you hit Push (P) in the right-hand rail.'
+    : 'Writes the key dsn_ask — but not to the queue. ' + ASK_UNDECLARED_WHY;
+  if (!ASK_DECLARED) els.askFine.className = 'dc-fine dc-warn-fine';
+
+  // ── state ───────────────────────────────────────────────────────────────
+  let canvas = null;                 // dsn_canvas — the pane's whole world
+  let files = null;                  // dsn_files
+  const lastSeq = { dsn_canvas: 0, dsn_files: 0 };
+  let loadState = 'idle';            // idle|loading|ok|http|net|live-store|not-canvas|empty|noname
+  let loadErr = '', loadedKey = null;
+  let booted = null;                 // did artboards actually appear in the frame?
+  let wrapNode = null, frame = null, ov = null, dockNode = null, armbar = null;
+  let armed = false, pins = [], popEl = null;
+  let askOpen = false, filesOpen = false, escalated = false;
+  let flashTimer = null, pollTimer = null, rafId = 0, lastGeomSig = '', lastMeasure = 0;
+  const markerEls = new Map();       // pin id -> marker element
+  const srcHashes = new Map();       // artboard file -> fingerprint of its serialised source
+  const hashes = new Map();          // artboard file -> fileHash12
+
+  // A pane script outlives its own DOM: a re-render runs a fresh copy while this
+  // one's timers and document listeners are still installed. Every one of them
+  // checks this and stands down.
+  const alive = () => !!(root && root.host && root.host.isConnected);
+  function stopAll() {
+    if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+    if (rafId) { cancelAnimationFrame(rafId); rafId = 0; }
+  }
+  // Offline: a node preview and a frozen export both run this script with no
+  // daemon behind them, so store writes and API calls go nowhere. Say so on the
+  // buttons rather than letting them look live and do nothing.
+  const offline = () => IS_PREVIEW || loadState === 'net';
+
+  function flash(text, bad) {
+    els.flash.textContent = s(text);
+    els.flash.className = 'dc-flash' + (bad ? ' bad' : '');
+    if (flashTimer) clearTimeout(flashTimer);
+    if (text) flashTimer = setTimeout(() => { els.flash.textContent = ''; }, 6000);
+  }
+
+  // A store write is adopted only when its seq strictly increases, so a replayed
+  // snapshot (node navigation, a reconnect) cannot walk the pane backwards.
+  //
+  // With ONE exception, and it is load-bearing. This pane script outlives its own
+  // service: the supervisor stops a service child whenever the last browser stops
+  // watching (services.js:133, fed by the WS client count) and respawns it when
+  // one returns — while the reconnect handshake is
+  // `applySnapshot(msg, {mode:'reconcile'})` (public/app/ws.js:137), which keeps
+  // a pane whose spec is unchanged MOUNTED (public/app/mounts.js:746-751). A
+  // fresh child that restarted its counter therefore publishes below our
+  // high-water mark, and a strict guard would drop every one of its writes
+  // forever: a canvas that looks fine, ignores the disk, and answers Reseed with
+  // nothing. service.js adopts a seq floor from the store to stop that at source;
+  // this is the other half, because the pane cannot assume its writer is ours.
+  //
+  // A REPEAT (q === lastSeq) is still refused — that is what a replay looks like,
+  // and it is the case the guard was written for. Only a strict REGRESSION is
+  // read as "a new writer started counting again", and adopting it is safe
+  // because the server's store is authoritative: a lower seq cannot arrive from
+  // behind (syncStore only publishes keys that differ from what this client
+  // already holds, mounts.js:793-800).
+  function accept(key, p) {
+    if (!p || typeof p !== 'object') return false;
+    const q = num(p.seq);
+    if (q != null) {
+      if (q === lastSeq[key]) return false;
+      if (q < lastSeq[key]) console.warn('design-canvas: ' + key + ' seq went backwards (' +
+        lastSeq[key] + ' → ' + q + '); treating it as a restarted service, not a replay.');
+      lastSeq[key] = q;
+    }
+    return true;
+  }
+
+  // dsn_ctl and dsn_ask both need a strictly increasing seq, and a remount must
+  // never restart below one already spent — so outrank both our own counter and
+  // whatever is sitting in the store right now.
+  let seqFloor = Date.now();
+  function nextSeq(key) {
+    let floor = seqFloor;
+    try {
+      const cur = store.get(key), prev = cur ? num(cur.seq) : null;
+      if (prev != null && prev > floor) floor = prev;
+    } catch (e) { /* store unavailable: our own counter is enough */ }
+    const now = Date.now();
+    seqFloor = now > floor ? now : floor + 1;
+    return seqFloor;
+  }
+  // CONTROL key. The service watches it over SSE and reacts; this does NOT wake
+  // Claude (CONTRACT §2.3) — it is a service reaction, not a declared signal.
+  function sendCtl(op) {
+    if (offline()) { flash('No daemon is listening here, so ' + op + ' cannot be sent.', true); return false; }
+    try { store.set({ dsn_ctl: { seq: nextSeq('dsn_ctl'), op: op } }); return true; }
+    catch (e) { flash('Could not write dsn_ctl: ' + s(e && e.message), true); return false; }
+  }
+
+  // ── the artboard index — ours, from the store, never the frame's ─────────
+  const artboards = () => arr(canvas && canvas.artboards).filter((a) => a && s(a.file));
+  function artboardSpec(file) {
+    for (const a of artboards()) if (s(a.file) === s(file)) return a;
+    return null;
+  }
+  const indexHas = (file) => !!artboardSpec(file);
+  function hashOf(file) {
+    const k = s(file);
+    if (!hashes.has(k)) hashes.set(k, A.fileHash12(k));
+    return hashes.get(k);
+  }
+
+  // ═════════════════════════════════════════════════════════════════════════
+  // HEADER
+  // ═════════════════════════════════════════════════════════════════════════
+  const STATE_LABEL = {
+    ready: ['ready', 'ok'], seeding: ['seeding', 'work'],
+    'no-payload': ['no payload', 'bad'], 'bad-dir': ['bad dir', 'bad'],
+    'seed-failed': ['seed failed', 'bad'], 'live-store': ['live store', 'bad'],
+  };
+  function paintHead() {
+    const title = s(canvas && canvas.title) || s(P.title) || 'Design canvas';
+    els.title.textContent = title;
+    els.title.title = title;
+
+    let label = 'waiting', tone = '', tip = 'No dsn_canvas in the store yet.';
+    if (canvas) {
+      const st = s(canvas.state);
+      const pair = STATE_LABEL[st] || [st || 'unknown', canvas.ok === false ? 'bad' : ''];
+      label = pair[0]; tone = pair[1];
+      tip = 'dsn_canvas.state = ' + (st || '(none)') + '  ·  ok = ' + String(canvas.ok !== false);
+    }
+    if (IS_PREVIEW) { label = 'preview'; tone = ''; tip = 'A still of a graph node: no frame, no fetch.'; }
+    els.badge.textContent = label;
+    els.badge.className = 'dc-badge' + (tone ? ' ' + tone : '');
+    els.badge.title = tip;
+
+    els.sub.replaceChildren();
+    const bits = [];
+    const n = artboards().length;
+    if (n) bits.push([String(n), ' artboard' + (n === 1 ? '' : 's')]);
+    const f = arr(files && files.files).length;
+    if (f) bits.push([String(f), ' file' + (f === 1 ? '' : 's') + ' on disk']);
+    if (canvas && canvas.bytes) bits.push([fmtBytes(canvas.bytes), ' canvas']);
+    if (canvas && canvas.seeded_at) bits.push([relTime(canvas.seeded_at), ' seeded']);
+    const up = obj(canvas && canvas.upstream);
+    if (up && up.version) bits.push(['Claude Code ' + s(up.version), '']);
+    for (let i = 0; i < bits.length; i++) {
+      if (i) els.sub.appendChild(document.createTextNode('·'));
+      const span = el('span');
+      span.appendChild(el('b', null, bits[i][0]));
+      if (bits[i][1]) span.appendChild(document.createTextNode(bits[i][1]));
+      els.sub.appendChild(span);
+    }
+    if (up && up.payload_sha256) {
+      const sha = el('span', null, 'payload ' + s(up.payload_sha256).slice(0, 8));
+      sha.title = 'sha256 ' + s(up.payload_sha256);
+      els.sub.appendChild(document.createTextNode('·'));
+      els.sub.appendChild(sha);
+    }
+
+    const canPin = loadState === 'ok' && !ISOLATE && !IS_PREVIEW;
+    els.pinBtn.disabled = !canPin;
+    els.pinBtn.className = 'dc-btn dc-btn-s' + (armed ? ' on' : '');
+    els.pinBtn.textContent = armed ? 'Pin mode: on' : 'Pin mode';
+    els.pinBtn.title = ISOLATE
+      ? 'Off in isolate mode: an opaque-origin frame cannot be read, so there is no artboard geometry to pin against.'
+      : (canPin
+        ? 'Arm a click-to-pin overlay over the canvas. While it is armed the canvas cannot be panned or zoomed.'
+        : 'Available once the canvas is on screen.');
+    els.reseedBtn.disabled = offline();
+    els.reseedBtn.title = offline()
+      ? 'Nothing is listening here — this is a snapshot, not the live surface.'
+      : 'Re-run the seeding helper over the current files (dsn_ctl op reseed). Always safe.';
+    els.askBtn.disabled = offline();
+    els.askBtn.title = offline()
+      ? 'Nothing is listening here — this is a snapshot, not the live surface.'
+      : (ASK_DECLARED
+        ? 'Write a note on dsn_ask, the pane’s one declared signal. It waits in the queue rail until you Push (P).'
+        : 'dsn_ask is not declared as a signal on this mount, so a note written here does not reach the queue rail. ' + ASK_UNDECLARED_WHY);
+    els.filesBtn.className = 'dc-btn dc-btn-s' + (filesOpen ? ' on' : '');
+    els.askBtn.className = 'dc-btn dc-btn-s dc-btn-go' + (askOpen ? ' on' : '');
+
+    paintBanner();
+    paintFiles();
+    paintAsk();
+  }
+
+  function bn(kind, iconName, parts) {
+    const b = el('div', 'dc-bn' + (kind ? ' ' + kind : ''));
+    b.appendChild(icon(iconName));
+    b.appendChild(line(el('div'), parts));
+    return b;
+  }
+  function paintBanner() {
+    const out = [];
+    if (ISOLATE && !IS_PREVIEW) {
+      out.push(bn('', 'off', ['Isolate mode: the canvas frame is sandboxed to an opaque origin, so it is viewer-only and ',
+        ['b', null, 'pins are off'],
+        '. Nothing inside it can reach this daemon — the trade is that nothing here can read its artboard geometry either.']));
+    }
+    if (!SECURE && !IS_PREVIEW) {
+      out.push(bn('warn', 'warn', ['This surface is not a secure context (', ['code', null, ORIGIN || 'this origin'],
+        '), so the canvas cannot run here. Open it on ', ['code', null, 'http://localhost'], ' or ',
+        ['code', null, 'http://127.0.0.1'], ' instead.']));
+    }
+    if (booted === false) {
+      out.push(bn('warn', 'warn', ['The canvas loaded but no artboards appeared in it. Reseed, or ask Claude to run the helper’s ',
+        ['code', null, '--check'], ' over the working files.']));
+    }
+    // Additive fields the service publishes beyond CONTRACT §2.1/§2.2. A canvas
+    // that seeded with warnings is not a canvas that seeded cleanly, and the
+    // helper's advisory stderr is the only place that difference is visible.
+    const warns = arr(canvas && canvas.warnings).map((w) => s(w).trim()).filter(Boolean);
+    if (warns.length) {
+      const b = el('div', 'dc-bn warn');
+      b.appendChild(icon('warn'));
+      const t = el('div');
+      t.appendChild(el('b', null, 'The helper seeded this canvas, with warnings.'));
+      for (const w of warns.slice(0, 5)) t.appendChild(el('div', 'dc-mono', w.slice(0, 400)));
+      if (warns.length > 5) t.appendChild(el('div', 'dc-fine', '+ ' + (warns.length - 5) + ' more'));
+      b.appendChild(t);
+      out.push(b);
+    }
+    if (!canvas && escalated) {
+      out.push(bn('warn', 'warn', ['Nothing from the design-canvas service yet. If it has not been approved on this machine, run ',
+        ['code', null, TRUST],
+        ' in your terminal — a pane can name that command but cannot grant it. A service also runs only while its pane is on the active node with a browser watching.']));
+    }
+    els.banner.hidden = !out.length;
+    els.banner.replaceChildren.apply(els.banner, out);
+  }
+
+  function paintFiles() {
+    els.files.hidden = !filesOpen;
+    if (!filesOpen) return;
+    const box = els.files;
+    box.replaceChildren();
+    box.appendChild(el('h4', null, 'Working files'));
+    const dir = s(files && files.dir);
+    if (dir) { const d = el('div', 'dc-what', dir); d.title = dir; box.appendChild(d); }
+    const list = arr(files && files.files);
+    if (!list.length) {
+      box.appendChild(el('div', 'dc-fine', files
+        ? 'The service reports no files in that directory.'
+        : 'The service has not published dsn_files yet.'));
+    } else {
+      const grid = el('div', 'dc-flist');
+      for (const f of list.slice(0, 200)) {
+        const n = el('div', 'n', s(f.name));
+        n.title = s(f.name);
+        grid.appendChild(n);
+        grid.appendChild(el('div', 'v', fmtBytes(f.bytes)));
+        grid.appendChild(el('div', 'v', relTime(f.mtime)));
+      }
+      box.appendChild(grid);
+    }
+    // A file sitting in the folder that is NOT on the canvas is exactly the kind
+    // of silence this pack is written against, so the service's reasons are shown.
+    const skipped = arr(files && files.skipped);
+    if (skipped.length) {
+      box.appendChild(el('div', 'dc-fine', 'In the folder, but not on the canvas:'));
+      for (const sk of skipped.slice(0, 20)) {
+        const row = el('div', 'dc-fine');
+        row.appendChild(el('b', null, s(sk.name)));
+        row.appendChild(document.createTextNode(' — ' + s(sk.reason).slice(0, 200)));
+        box.appendChild(row);
+      }
+      if (skipped.length > 20) box.appendChild(el('div', 'dc-fine', '+ ' + (skipped.length - 20) + ' more'));
+    }
+    const row = el('div', 'dc-row');
+    const re = btn('dc-btn dc-btn-s', 'Re-read the directory');
+    re.addEventListener('click', () => { if (sendCtl('rescan')) flash('Asked the service to re-read the directory (dsn_ctl op rescan).'); });
+    row.appendChild(re);
+    row.appendChild(el('span', 'dc-fine',
+      (files && files.has_canvas_json
+        ? 'canvas.json is present, so the layout is yours. '
+        : 'No canvas.json — the helper lays the artboards out itself. ') +
+      (P.watch === false || P.watch === 'false'
+        ? 'This pane was mounted with watch:false, so edits on disk do NOT re-seed on their own — use Reseed. '
+        : 'Edits to these files re-seed the canvas on their own. ') +
+      'Nothing on this surface ever writes to that directory.'));
+    box.appendChild(row);
+  }
+
+  // ── ask panel: the ONE declared signal (CONTRACT §2.4) ───────────────────
+  function paintAsk() {
+    els.ask.hidden = !askOpen;
+    if (!askOpen) return;
+    const n = artboards().length;
+    els.askWhat.textContent = [s(canvas && canvas.title) || s(P.title) || '(untitled)',
+      n + ' artboard' + (n === 1 ? '' : 's'),
+      'state ' + (s(canvas && canvas.state) || 'unknown')].join('  ·  ');
+    const want = els.askBoard.value;
+    const sig = artboards().map((a) => s(a.file)).join('|');
+    if (els.askBoard._sig !== sig) {
+      els.askBoard._sig = sig;
+      els.askBoard.replaceChildren();
+      const all = el('option', null, 'the whole canvas');
+      all.value = '';
+      els.askBoard.appendChild(all);
+      for (const a of artboards()) {
+        const o = el('option', null, s(a.file));
+        o.value = s(a.file);
+        els.askBoard.appendChild(o);
+      }
+      els.askBoard.value = want;
+      if (els.askBoard.value !== want) els.askBoard.value = '';
+    }
+  }
+  function openAsk(prefillNote, artboard) {
+    askOpen = true;
+    paintAsk();
+    if (artboard) els.askBoard.value = artboard;
+    if (prefillNote && !els.askNote.value.trim()) {
+      els.askNote.value = String(prefillNote);
+      // A programmatic write fires nothing on its own, and composed:true is what
+      // carries the event through the shadow boundary to the shell's form-state
+      // capture — without it the note would not survive a refresh.
+      els.askNote.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+    }
+    paintHead();
+    els.askNote.focus();
+  }
+  function sendAsk() {
+    const board = s(els.askBoard.value);
+    const payload = {
+      seq: nextSeq('dsn_ask'),
+      note: String(els.askNote.value || '').slice(0, 2000),
+      artboard: board || null,
+    };
+    try { store.set({ dsn_ask: payload }); }
+    catch (e) { return flash('Could not write dsn_ask: ' + s(e && e.message), true); }
+    els.askNote.value = '';
+    els.askNote.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+    els.askNote.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
+    askOpen = false;
+    paintHead();
+    // Only claim the handoff that will actually happen. Without the declaration
+    // this write reaches nothing at all (see ASK_DECLARED), and an empty queue
+    // rail after a confident "queued" is worse than no button.
+    flash(ASK_DECLARED
+      ? 'Queued on dsn_ask — hit Push (P) in the right-hand rail to hand it over.'
+      : 'Written to dsn_ask, but NOT queued. ' + ASK_UNDECLARED_WHY, !ASK_DECLARED);
+  }
+
+  els.askBtn.addEventListener('click', () => {
+    if (askOpen) { askOpen = false; paintHead(); } else openAsk();
+  });
+  els.ask.querySelector('[data-ask-cancel]').addEventListener('click', () => { askOpen = false; paintHead(); });
+  els.ask.querySelector('[data-ask-send]').addEventListener('click', sendAsk);
+  els.filesBtn.addEventListener('click', () => { filesOpen = !filesOpen; paintHead(); });
+  els.reseedBtn.addEventListener('click', () => {
+    if (sendCtl('reseed')) flash('Asked the service to re-seed. The frame reloads when it publishes.');
+  });
+  els.pinBtn.addEventListener('click', () => setArmed(!armed));
+
+  // ═════════════════════════════════════════════════════════════════════════
+  // STATE SCREENS — every state gets a distinct, useful one (CONTRACT §3)
+  // ═════════════════════════════════════════════════════════════════════════
+  function screen(kind, iconName, head, paras) {
+    const box = el('div', 'dc-screen' + (kind ? ' ' + kind : ''));
+    box.appendChild(icon(iconName, 'dc-ic-b'));
+    box.appendChild(el('div', 'dc-h', head));
+    for (const p of arr(paras)) box.appendChild(line(el('p', 'dc-p'), Array.isArray(p) ? p : [p]));
+    return box;
+  }
+  function bar() { const b = el('div', 'dc-bar'); b.appendChild(el('i')); return b; }
+  function actions(box, specs) {
+    const row = el('div', 'dc-btns');
+    for (const spec of specs) {
+      if (!spec || !spec[0]) continue;
+      const b = btn('dc-btn' + (spec[2] ? ' ' + spec[2] : ''), spec[0]);
+      b.addEventListener('click', spec[1]);
+      row.appendChild(b);
+    }
+    box.appendChild(row);
+    return box;
+  }
+  function artboardCards() {
+    const list = artboards();
+    if (!list.length) return null;
+    const grid = el('div', 'dc-cards');
+    for (const a of list.slice(0, 60)) {
+      const c = el('div', 'dc-card');
+      const n = el('div', 'n', s(a.file));
+      n.title = s(a.file);
+      c.appendChild(n);
+      const w = num(a.w), h = num(a.h);
+      c.appendChild(el('div', 'm', w != null && h != null
+        ? Math.round(w) + ' × ' + Math.round(h)
+        : 'laid out by the helper'));
+      grid.appendChild(c);
+    }
+    return grid;
+  }
+  function filesCards() {
+    const list = arr(files && files.files);
+    if (!list.length) return null;
+    const grid = el('div', 'dc-cards');
+    for (const f of list.slice(0, 60)) {
+      const c = el('div', 'dc-card');
+      const n = el('div', 'n', s(f.name));
+      n.title = s(f.name);
+      c.appendChild(n);
+      c.appendChild(el('div', 'm', fmtBytes(f.bytes)));
+      grid.appendChild(c);
+    }
+    return grid;
+  }
+  function showScreen(node) { teardownFrame(); els.stage.replaceChildren(node); }
+  const reseedAction = () => ['Reseed', () => { if (sendCtl('reseed')) flash('Asked the service to re-seed.'); }];
+  const askAction = (prefill) => ['Ask Claude', () => openAsk(prefill), 'dc-btn-go'];
+  const retryAction = () => ['Retry', () => { loadedKey = null; loadState = 'idle'; run(); }];
+
+  function paintStage() {
+    if (IS_PREVIEW) return showScreen(previewScreen());
+    if (!canvas) return showScreen(waitingScreen());
+
+    const st = s(canvas.state);
+    if (st === 'no-payload') return showScreen(noPayloadScreen());
+    if (st === 'bad-dir') return showScreen(badDirScreen());
+    if (st === 'seed-failed') return showScreen(seedFailedScreen());
+    if (st === 'live-store') return showScreen(liveStoreScreen(canvas.error, canvas.hint));
+    if (st === 'seeding') return showScreen(seedingScreen());
+    if (st !== 'ready' || canvas.ok === false) return showScreen(unknownStateScreen());
+
+    // The secure-context check happens BEFORE any frame is created.
+    if (!SECURE) return showScreen(insecureScreen());
+
+    if (loadState === 'live-store') return showScreen(liveStoreScreen(
+      'The carrier the service wrote still has store:"db" in its own state block.', null));
+    if (loadState === 'net') return showScreen(exportScreen());
+    if (loadState === 'http') return showScreen(carrierScreen());
+    if (loadState === 'noname') return showScreen(actions(screen('bad', 'warn',
+      'The service named no payload component',
+      ['dsn_canvas says ready but carries no payload_component, so there is nothing to fetch.']),
+      [reseedAction()]));
+    if (loadState === 'badname') return showScreen(badCarrierScreen());
+    if (loadState === 'empty' || loadState === 'not-canvas') return showScreen(notCanvasScreen());
+    if (loadState !== 'ok') return showScreen(loadingScreen());
+    showFrame();
+  }
+
+  // — node preview / glance card (CONTRACT §5.2) —
+  function previewScreen() {
+    const box = screen('', 'canvas', s(canvas && canvas.title) || s(P.title) || 'Design canvas', [
+      ['This is a still of a graph node. Previews are served with ', ['code', null, "default-src 'none'"],
+        ' and ', ['code', null, "connect-src 'none'"],
+        ', so the canvas frame and the fetch that fills it are both dead here. An empty box would just look broken; this is what there actually is.'],
+      'Open the live surface to pan, zoom and pin on it.',
+    ]);
+    const cards = artboardCards();
+    if (cards) box.insertBefore(cards, box.querySelector('p'));
+    return box;
+  }
+
+  // — nothing on dsn_canvas yet —
+  function waitingScreen() {
+    const box = screen('', 'canvas', 'Waiting for the design-canvas service', [
+      'The service owns seeding and file watching; this pane renders what it publishes on dsn_canvas.',
+    ]);
+    box.insertBefore(bar(), box.querySelector('p'));
+    if (escalated) {
+      box.appendChild(line(el('p', 'dc-p'),
+        ['Still nothing. A host service does not start until it is approved once, in your terminal:']));
+      box.appendChild(el('div', 'dc-pre', TRUST));
+      box.appendChild(line(el('p', 'dc-p'), ['That approval is keyed on the project, the service’s own source and its params, so editing it or changing ',
+        ['code', null, 'dir'], ' asks again. A service also runs only while its pane is on the active node with a browser watching.']));
+    }
+    return box;
+  }
+
+  // — state: no-payload —
+  function noPayloadScreen() {
+    const box = screen('warn', 'warn', 'Claude Design is not on this machine yet', [
+      s(canvas.error) || 'The canvas editor is written into a temp directory the first time Claude Code’s bundled design skill runs in a session. This pack never ships it and never extracts it.',
+    ]);
+    box.appendChild(el('div', 'dc-pre', s(canvas.hint) || 'Run `/design` once in Claude Code.'));
+    box.appendChild(line(el('p', 'dc-p'), ['That is the whole fix: one ', ['code', null, '/design'],
+      ' run materialises the editor, then reseed here. It is a first-class answer, not a fallback — this pane reads the copy Claude Code itself wrote for you.']));
+    return actions(box, [reseedAction(),
+      askAction('The design-canvas pane says Claude Design has not been materialised on this machine.')]);
+  }
+
+  // — state: bad-dir —
+  function badDirScreen() {
+    const box = screen('bad', 'warn', 'That directory is not a canvas', [
+      s(canvas.error) || 'The dir param is missing, holds no artboards, or resolved outside the project.',
+    ]);
+    if (canvas.hint) box.appendChild(el('div', 'dc-pre', s(canvas.hint)));
+    box.appendChild(line(el('p', 'dc-p'), ['A canvas directory needs at least one ', ['code', null, '<Name>.dc.html'], '. ',
+      ['code', null, 'canvas.json'], ' is optional and images are picked up automatically. The path is fenced to the project: a ',
+      ['code', null, 'dir'], ' that escapes it is refused outright rather than quietly re-pointed somewhere else.']));
+    return actions(box, [askAction('The design-canvas pane reports bad-dir: ' + s(canvas.error))]);
+  }
+
+  // — state: seed-failed. The helper's stderr IS the answer here — it is written
+  //   to be read, so it is shown verbatim and never summarised or truncated. —
+  function seedFailedScreen() {
+    const box = screen('bad', 'warn', 'The seeding helper refused', [
+      s(canvas.error) || 'The helper exited non-zero. Its own diagnostics follow, verbatim.',
+    ]);
+    if (canvas.hint) box.appendChild(el('div', 'dc-pre', s(canvas.hint)));
+    return actions(box, [reseedAction(),
+      askAction('The seeding helper failed. Its stderr was:\n\n' + s(canvas.hint || canvas.error))]);
+  }
+
+  // — state: live-store (CONTRACT §3, §5.4) —
+  function liveStoreScreen(err, hint) {
+    const box = screen('bad', 'off', 'That is a live-store canvas, not ours', [
+      s(err) || 'Its state block carries store:"db", so it boots read-only against a Firestore-shaped live store no matter what a host offers it.',
+      ['This pane only ever shows canvases seeded from ', ['code', null, '.dc.html'],
+        ' files on your own disk — never a published Artifact, never someone else’s canvas. Refusing this one is the invariant working, not a bug.'],
+    ]);
+    if (hint) box.appendChild(el('div', 'dc-pre', s(hint)));
+    return actions(box, [reseedAction()]);
+  }
+
+  // — state: seeding —
+  function seedingScreen() {
+    const box = screen('', 'canvas', 'Seeding “' + (s(canvas.title) || s(P.title) || 'this canvas') + '”', [
+      'The helper is folding your working files into a copy of the editor. The transform is purely textual and it never writes to your directory.',
+    ]);
+    box.insertBefore(bar(), box.querySelector('p'));
+    const cards = artboardCards() || filesCards();
+    if (cards) box.appendChild(cards);
+    return box;
+  }
+
+  function unknownStateScreen() {
+    const box = screen('warn', 'warn', 'The service reported a state this pane does not know', [
+      'dsn_canvas.state = ' + (s(canvas.state) || '(none)') + ', ok = ' + String(canvas.ok !== false) + '.',
+      s(canvas.error) || 'No error text came with it.',
+    ]);
+    if (canvas.hint) box.appendChild(el('div', 'dc-pre', s(canvas.hint)));
+    return actions(box, [reseedAction(), askAction('The design-canvas pane got an unknown state: ' + s(canvas.state))]);
+  }
+
+  // — non-secure context (CONTRACT §5.2, FINDINGS §5) —
+  function insecureScreen() {
+    return screen('warn', 'warn', 'This origin cannot run the canvas', [
+      ['The editor needs a secure context, and ', ['code', null, ORIGIN || 'this origin'], ' is not one: ',
+        ['code', null, 'crypto.randomUUID'],
+        ' is undefined there, the artboard handshake throws, and the canvas hangs on a spinner with its toolbar drawn — which looks like a slow load and never finishes.'],
+      ['Working origins are ', ['code', null, 'http://localhost'], ', ', ['code', null, 'http://127.0.0.1'], ', any ',
+        ['code', null, '*.localhost'], ', any ', ['code', null, 'https://'], ' and ', ['code', null, 'file://'],
+        '. A LAN IP, a bare hostname, or an mDNS ', ['code', null, '.local'], ' name is not.'],
+      'The frame is deliberately not mounted here: a permanent spinner would tell you less than this does.',
+    ]);
+  }
+
+  function loadingScreen() {
+    const box = screen('', 'canvas', 'Fetching the canvas', [
+      ['It arrives over ', ['code', null, 'GET /api/components/' + s(canvas && canvas.payload_component)],
+        ' — same origin, no new listener — and goes straight into the frame. It never enters this pane’s html or the store, because both are snapshotted into every committed graph node.'],
+    ]);
+    box.insertBefore(bar(), box.querySelector('p'));
+    if (canvas && canvas.bytes) box.appendChild(el('div', 'dc-fine', 'about ' + fmtBytes(canvas.bytes)));
+    return box;
+  }
+
+  // — the fetch rejected. In a frozen export that is the ONLY possible outcome:
+  //   the export runtime runs pane scripts against a document with no server. —
+  function exportScreen() {
+    const t = s(canvas && canvas.title) || s(P.title) || 'the canvas';
+    const box = screen('', 'file', 'This canvas exports as its own file', [
+      ['A seeded canvas is already a self-contained, interactive document, so the right export of it is that file — ',
+        ['code', null, slug(t) + '.html'],
+        ' — and not a snapshot of this pane. The service writes it in its build directory; ask Claude for the exact path.'],
+      ['Nothing answered ', ['code', null, '/api/components'], ' here', loadErr ? ' (' + loadErr + ')' : '',
+        '. In an export that is expected. On the live surface it means the daemon is not reachable.'],
+    ]);
+    return actions(box, [retryAction()]);
+  }
+  function slug(t) {
+    const out = String(t).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 60);
+    return out || 'canvas';
+  }
+
+  function carrierScreen() {
+    const box = screen('warn', 'warn', 'The canvas carrier is not there', [
+      'dsn_canvas points at a component the components route will not serve: ' + (loadErr || 'it answered an error') + '.',
+      ['The service writes that carrier at runtime under ', ['code', null, '<webChatDir>/components/'],
+        '. It is a data carrier, not a pane — never mount it. Reseeding rewrites it, and the registry re-reads the directory on every call, so nothing needs restarting.'],
+    ]);
+    return actions(box, [reseedAction(), retryAction()]);
+  }
+
+  // — the store named a component that is not one of ours (CONTRACT §9.2) —
+  function badCarrierScreen() {
+    const box = screen('bad', 'off', 'That is not this pane’s canvas carrier', [
+      ['dsn_canvas.payload_component is ', ['code', null, capFrame(loadErr) || '(empty)'],
+        ', which is not a name the design-canvas service ever writes. Nothing was fetched and nothing was mounted.'],
+      ['This pane only ever shows canvases seeded from ', ['code', null, '.dc.html'],
+        ' files under its own ', ['code', null, 'dir'],
+        ' — so the one thing it will load is the carrier its own service just wrote. Whatever put that name in the store, it was not that service.'],
+    ]);
+    return actions(box, [reseedAction()]);
+  }
+
+  function notCanvasScreen() {
+    const box = screen('warn', 'warn', 'That carrier is not a seeded canvas', [
+      loadState === 'empty'
+        ? 'The components route returned no source at all.'
+        : ['Its document has no ', ['code', null, 'appifact-doc'],
+          ' state block, so it would boot in file mode with nothing in it. Something other than the seeding helper wrote that file.'],
+    ]);
+    return actions(box, [reseedAction()]);
+  }
+
+  // ═════════════════════════════════════════════════════════════════════════
+  // THE FRAME
+  // ═════════════════════════════════════════════════════════════════════════
+  function buildWrap() {
+    if (wrapNode) return wrapNode;
+    wrapNode = el('div', 'dc-wrap');
+    ov = el('div', 'dc-ov');
+    ov.addEventListener('click', onOverlayClick);
+    dockNode = el('div', 'dc-dock');
+    armbar = el('div', 'dc-armbar');
+    armbar.hidden = true;
+    wrapNode.appendChild(ov);
+    wrapNode.appendChild(dockNode);
+    wrapNode.appendChild(armbar);
+    return wrapNode;
+  }
+  function showFrame() {
+    const w = buildWrap();
+    // Re-parenting an iframe RELOADS it, so never replaceChildren over a wrap
+    // that is already the stage's only child: that would re-parse 2.4 MB and
+    // throw away the user's pan and zoom on every repaint.
+    if (els.stage.firstChild !== w || els.stage.childElementCount !== 1) els.stage.replaceChildren(w);
+  }
+  function teardownFrame() {
+    if (!wrapNode) return;
+    setArmed(false);
+    closePop();
+    if (frame) { frame.remove(); frame = null; }
+    markerEls.clear();
+    wrapNode = null; ov = null; dockNode = null; armbar = null;
+    booted = null;
+    stopAll();
+  }
+  function mountFrame(src) {
+    const w = buildWrap();
+    const f = document.createElement('iframe');
+    f.setAttribute('title', 'Design canvas: ' + (s(canvas && canvas.title) || 'untitled'));
+    f.setAttribute('referrerpolicy', 'no-referrer');
+    // srcdoc inherits the surface origin, which is what makes artboard geometry
+    // readable and pins possible (CONTRACT §7) and is also the exposure §9.3
+    // governs. `isolate` trades that geometry away for an opaque origin;
+    // allow-downloads is kept so the canvas's own PNG/PDF export still works.
+    if (ISOLATE) f.setAttribute('sandbox', 'allow-scripts allow-downloads');
+    if (frame) frame.remove();
+    frame = f;
+    w.insertBefore(f, ov);
+    f.srcdoc = src;
+  }
+
+  function frameDoc() {
+    if (!frame || ISOLATE) return null;
+    try {
+      const d = frame.contentDocument;
+      return d && d.documentElement ? d : null;
+    } catch (e) { return null; }        // opaque origin, or not loaded yet
+  }
+  function artboardEls() {
+    const d = frameDoc();
+    if (!d) return [];
+    try { return Array.prototype.slice.call(d.querySelectorAll('[data-mega-artboard]')); }
+    catch (e) { return []; }
+  }
+  // "It loaded" and "it works" are different claims. Only the second one is
+  // worth making, and only artboards in the DOM support it.
+  function probeCanvas() {
+    let tries = 0;
+    const tick = () => {
+      if (!alive() || loadState !== 'ok') return;
+      if (artboardEls().length > 0) {
+        if (booted !== true) { booted = true; paintHead(); }
+        return;
+      }
+      if (++tries >= 5) {
+        // In isolate mode there is nothing to see by design, so silence there
+        // is not a failure.
+        if (booted !== false && !ISOLATE) { booted = false; paintHead(); }
+        return;
+      }
+      setTimeout(tick, 1500);
+    };
+    setTimeout(tick, 1500);
+  }
+
+  // ── geometry ────────────────────────────────────────────────────────────
+  //
+  // The canvas renders every artboard as one absolutely positioned box —
+  //   style: { left: x, top: y - gn, width: w, height: h + gn }
+  // — inside a single `translate(...) scale(...)` transform, and stamps the
+  // artboard's own file key on it as `data-mega-artboard`. `gn` is a fixed
+  // header hoist applied to some artboards, so the element's TOP can sit above
+  // the artboard, while its bottom, left and width are always exact.
+  //
+  // Reading rects rather than the transform means pan, zoom, focus mode and any
+  // future layout come out right for free. The rects are hit-tested here rather
+  // than through the frame's own elementFromPoint, because the canvas stacks
+  // full-bleed overlays of its own and elementFromPoint would return one of
+  // those and resolve to no artboard at all.
+  function correctBox(r, file) {
+    const spec = file ? artboardSpec(file) : null;
+    const w = spec ? num(spec.w) : null, h = spec ? num(spec.h) : null;
+    if (w && h && w > 0 && h > 0 && r.width > 0) {
+      const scale = r.width / w;
+      const trueH = h * scale;
+      const delta = r.height - trueH;
+      if (Math.abs(delta) <= 0.5) return { left: r.left, top: r.top, width: r.width, height: r.height, exact: true };
+      // Only a small POSITIVE delta is the header hoist. Anything else means the
+      // index does not describe what is on screen (a focus-mode size override, a
+      // stale canvas.json), and then the raw rect is the more honest answer.
+      if (delta > 0.5 && delta <= 48 * scale + 1) {
+        return { left: r.left, top: r.top + delta, width: r.width, height: trueH, exact: true };
+      }
+    }
+    return { left: r.left, top: r.top, width: r.width, height: r.height, exact: false };
+  }
+  function geometry() {
+    const out = [];
+    if (!frame) return out;
+    for (const node of artboardEls()) {
+      let raw = '';
+      try { raw = node.getAttribute('data-mega-artboard') || ''; } catch (e) { raw = ''; }
+      // Prefer OUR index: an exact match means the string is one we already
+      // hold, and everything downstream — the hash input and the label — then
+      // uses our copy rather than the frame's.
+      const known = indexHas(raw);
+      const file = known ? raw : capFrame(raw);
+      if (!file) continue;
+      let r = null;
+      try { r = node.getBoundingClientRect(); } catch (e) { continue; }
+      if (!r || r.width <= 0 || r.height <= 0) continue;
+      out.push({ node: node, file: file, known: known, box: correctBox(r, known ? file : null) });
+    }
+    return out;
+  }
+  function geomSig(g) {
+    if (!frame) return '';
+    let fr;
+    try { fr = frame.getBoundingClientRect(); } catch (e) { return ''; }
+    let sig = Math.round(fr.left) + ',' + Math.round(fr.top) + ',' + Math.round(fr.width) + ',' + Math.round(fr.height);
+    for (const a of g) {
+      sig += '|' + a.file + ':' + Math.round(a.box.left) + ',' + Math.round(a.box.top) +
+        ',' + Math.round(a.box.width) + ',' + Math.round(a.box.height);
+    }
+    return sig + '#' + pins.length;
+  }
+  // A cheap drift fingerprint (CONTRACT §4.5): the artboard's serialised source
+  // as the canvas itself holds it. Each artboard renders into a sandboxed child
+  // iframe whose `srcdoc` ATTRIBUTE is readable from the parent document —
+  // reading an attribute is not a cross-origin read. An artboard the canvas has
+  // not rendered yet has none, and unknown is NOT drift.
+  function srcFingerprint(a) {
+    if (!a) return null;
+    if (srcHashes.has(a.file)) return srcHashes.get(a.file);
+    let out = null;
+    try {
+      const ifr = a.node.querySelector('iframe');
+      const sd = ifr && ifr.getAttribute('srcdoc');
+      if (typeof sd === 'string' && sd) out = A.fileHash12(String(sd.length) + ':' + sd);
+    } catch (e) { out = null; }
+    if (out) srcHashes.set(a.file, out);
+    return out;
+  }
+
+  // ═════════════════════════════════════════════════════════════════════════
+  // PINS (CONTRACT §4)
+  // ═════════════════════════════════════════════════════════════════════════
+  function setArmed(on) {
+    const next = !!on && loadState === 'ok' && !ISOLATE && !IS_PREVIEW && !!ov;
+    if (next === armed) return;
+    armed = next;
+    if (ov) ov.classList.toggle('armed', armed);
+    if (armed) {
+      document.addEventListener('keydown', onArmedKey, true);
+      paintArmbar();
+      let shellPin = false;
+      try { shellPin = !!(document.body && document.body.classList.contains('pin-mode')); } catch (e) {}
+      flash(shellPin
+        ? 'The surface’s own pin mode is on too — turn it off, or its pins land on this overlay instead of on the canvas.'
+        : 'Pin mode armed. Click an artboard to place a pin; panning and zoom are paused until you leave.', shellPin);
+      lastGeomSig = '';
+      schedulePump();
+    } else {
+      document.removeEventListener('keydown', onArmedKey, true);
+      if (armbar) armbar.hidden = true;
+      closePop();
+    }
+    paintHead();
+  }
+  function onArmedKey(e) {
+    if (!alive()) { document.removeEventListener('keydown', onArmedKey, true); return; }
+    if (e.key !== 'Escape') return;
+    e.preventDefault(); e.stopPropagation();
+    if (popEl) { closePop(); return; }
+    setArmed(false);
+  }
+  function paintArmbar() {
+    if (!armbar) return;
+    armbar.hidden = false;
+    armbar.replaceChildren();
+    armbar.appendChild(icon('pin'));
+    const t = el('span');
+    t.appendChild(el('b', null, 'Pin mode is on.'));
+    t.appendChild(document.createTextNode(
+      ' Click an artboard to pin a comment to that point. While it is on, the canvas cannot be panned, zoomed or selected — every click lands here instead.'));
+    armbar.appendChild(t);
+    armbar.appendChild(el('span', 'dc-sp'));
+    const off = btn('dc-btn dc-btn-s', 'Done (Esc)');
+    off.addEventListener('click', () => setArmed(false));
+    armbar.appendChild(off);
+  }
+
+  function onOverlayClick(e) {
+    if (!armed) return;
+    if (popEl) { closePop(); return; }
+    const hit = hitTest(e.clientX, e.clientY);
+    if (!hit) { flash('That point is not on an artboard — a pin anchors to an artboard, not to empty canvas.', true); return; }
+    openComposer(hit, e.clientX, e.clientY);
+  }
+  function hitTest(cx, cy) {
+    let found = null;
+    for (const a of geometry()) {
+      const b = a.box;
+      // Last match wins: later in DOM order paints on top.
+      if (cx >= b.left && cx <= b.left + b.width && cy >= b.top && cy <= b.top + b.height) found = a;
+    }
+    if (!found) return null;
+    return {
+      a: found,
+      fx: (cx - found.box.left) / found.box.width,
+      fy: (cy - found.box.top) / found.box.height,
+    };
+  }
+
+  // Minted in the payload's OWN grammar (CONTRACT §4.2) so these strings hand
+  // straight to `claude.comments.customAnchors` when v0.2 injects it, with zero
+  // migration. Under an unmodified web-chat the string is syntactically valid
+  // CSS that matches nothing, so the shell's own marker layer skips it instead
+  // of throwing — and this pane draws the markers.
+  function mint(hit, note) {
+    const a = hit.a;
+    const selector = A.artboardAnchor(a.file, hit.fx, hit.fy);
+    // artboardAnchor validates strictly and returns null rather than an invalid
+    // string. An invalid anchor is DROPPED, never stored (CONTRACT §4.3).
+    if (!selector) return null;
+    // The label is derived from OUR index, never from frame DOM text, and goes
+    // through capFrame — BOUNDED AND SANITISED, which is what CONTRACT §4.4
+    // asks for, not merely bounded. Both halves are load-bearing:
+    //   - 60 chars, because lib/server/routes/comments.js:35-41 describeAnchor
+    //     interpolates this straight into `anchor_label` as `<mount>: "<text>"`
+    //     with only a .trim(), and that string is what get_comments hands me;
+    //   - control characters flattened, because `a.file` is only as clean as
+    //     the artboard index, and that index is not a closed set. It is built
+    //     from readdirSync entry names (service.js artboardIndex) with no name
+    //     grammar of the service's own — a POSIX filename may legally contain a
+    //     newline — and the service publishes `artboards` in the failure states
+    //     too. The store is also writable by anything same-origin, which under
+    //     CONTRACT §9.3 includes the canvas frame itself. A .slice(60) alone
+    //     would let a newline through into my prompt.
+    const where = a.known ? a.file : 'on the canvas';
+    const label = capFrame(where + ' · ' + pct(hit.fx) + '%,' + pct(hit.fy) + '%');
+    const spec = a.known ? artboardSpec(a.file) : null;
+    return {
+      text: String(note || ''),
+      anchor: {
+        mount: mountId,
+        selector: selector,
+        text: label,
+        ordinal: 0,
+        // The drift fingerprint rides INSIDE the pin's own anchor object, so it
+        // inherits the pin's shared/private filtering instead of leaking pin
+        // locations into the store, where get_store would hand them over
+        // regardless (CONTRACT §4.5).
+        dsn: {
+          v: 1,
+          file: a.known ? capFrame(a.file) : null,
+          fx: Math.round(hit.fx * 10000) / 10000,
+          fy: Math.round(hit.fy * 10000) / 10000,
+          w: spec ? num(spec.w) : null,
+          h: spec ? num(spec.h) : null,
+          src: srcFingerprint(a),
+          exact: !!a.box.exact,
+        },
+      },
+    };
+  }
+
+  function openComposer(hit, cx, cy) {
+    const pop = el('div', 'dc-pop');
+    const head = el('div', 'dc-pop-h');
+    head.appendChild(icon('pin'));
+    head.appendChild(el('span', 'a',
+      (hit.a.known ? hit.a.file : 'on the canvas') + ' · ' + pct(hit.fx) + '%,' + pct(hit.fy) + '%'));
+    pop.appendChild(head);
+    const ta = el('textarea', 'dc-ta');
+    ta.setAttribute('rows', '3');
+    ta.setAttribute('placeholder', 'Comment on this spot…');
+    // data-no-persist: a half-typed pin must not ride into graph history, and
+    // excluding it also keeps the ask note's form_state key stable.
+    ta.setAttribute('data-no-persist', '');
+    pop.appendChild(ta);
+    const shareRow = el('label', 'dc-lab');
+    const cb = document.createElement('input');
+    cb.type = 'checkbox'; cb.checked = true;
+    cb.setAttribute('data-no-persist', '');
+    shareRow.appendChild(cb);
+    shareRow.appendChild(document.createTextNode('Share with Claude'));
+    const row = el('div', 'dc-row');
+    row.appendChild(shareRow);
+    row.appendChild(el('span', 'dc-sp'));
+    const cancel = btn('dc-btn dc-btn-s', 'Cancel');
+    cancel.addEventListener('click', () => closePop());
+    row.appendChild(cancel);
+    const save = btn('dc-btn dc-btn-s dc-btn-go', 'Pin');
+    save.addEventListener('click', () => {
+      const minted = mint(hit, ta.value.trim());
+      closePop();
+      if (!minted) { flash('That anchor did not validate, so nothing was stored.', true); return; }
+      setArmed(false);
+      placePin(minted, cb.checked);
+    });
+    row.appendChild(save);
+    pop.appendChild(row);
+    showPop(pop, cx, cy);
+    ta.focus();
+  }
+
+  async function placePin(minted, shared) {
+    try {
+      const r = await fetch('/api/comments', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text: minted.text, shared: !!shared, anchor: minted.anchor }),
+      });
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+    } catch (e) {
+      flash('The pin could not be stored: ' + s(e && e.message), true);
+      return;
+    }
+    flash('Pinned to ' + minted.anchor.text + (shared ? ' — shared with Claude.' : ' — private to you.'));
+    pollPins();
+  }
+
+  // Read-back is validated too (CONTRACT §4.3): the server stores `anchor`
+  // verbatim with zero validation and describeAnchor does not truncate
+  // `selector`, so an unbounded or malformed anchor is dropped here rather than
+  // projected, shown, or believed.
+  function decorate(pin) {
+    const a = obj(pin && pin.anchor);
+    if (!a || s(a.mount) !== s(mountId)) return null;
+    if (!A.isValidAnchor(a.selector)) return null;
+    const parsed = A.parseArtboardAnchor(a.selector);
+    if (!parsed) return null;
+    const fp = obj(a.dsn);
+    return {
+      id: s(pin.id),
+      text: String(pin.text == null ? '' : pin.text).slice(0, 800),
+      shared: pin.shared !== false,
+      replies: arr(pin.replies).slice(-6).map((r) => ({
+        author: s(r && r.author), text: String((r && r.text) || '').slice(0, 400),
+      })),
+      hash: parsed.fileHash12,
+      fx: parsed.fx,
+      fy: parsed.fy,
+      label: capFrame(a.text),
+      fp: fp && num(fp.v) === 1 ? fp : null,
+    };
+  }
+  async function pollPins() {
+    if (IS_PREVIEW || !alive()) return;
+    let list = null;
+    try {
+      const r = await fetch('/api/comments?mount=' + encodeURIComponent(mountId));
+      if (!r.ok) return;
+      const j = await r.json();
+      list = arr(j.comments);
+    } catch (e) { return; }       // offline or frozen export: keep what we have
+    const next = [];
+    for (const p of list) { const d = decorate(p); if (d) next.push(d); }
+    const changed = next.length !== pins.length ||
+      next.some((p, i) => p.id !== pins[i].id || p.shared !== pins[i].shared ||
+        p.text !== pins[i].text || p.replies.length !== pins[i].replies.length);
+    pins = next;
+    if (changed) lastGeomSig = '';
+    if (pins.length) schedulePump();
+    layoutMarkers();
+  }
+
+  const pinTone = (p) => (!p.shared ? 'priv' : (p.replies.some((r) => r.author === 'claude') ? 'rep' : ''));
+  // A fraction anchor survives an artboard rewrite and then points confidently
+  // at whatever moved into that spot, so a changed fingerprint renders the
+  // marker as "may have moved" rather than as healthy (CONTRACT §4.5).
+  function drifted(p, a) {
+    if (!p.fp || !a) return false;
+    const spec = a.known ? artboardSpec(a.file) : null;
+    const w = spec ? num(spec.w) : null, h = spec ? num(spec.h) : null;
+    const fw = num(p.fp.w), fh = num(p.fp.h);
+    if (w != null && fw != null && (w !== fw || h !== fh)) return true;
+    const cur = srcFingerprint(a);
+    return !!(p.fp.src && cur && p.fp.src !== cur);
+  }
+  function geoFor(hash) {
+    for (const a of geometry()) if (hashOf(a.file) === hash) return a;
+    return null;
+  }
+
+  function layoutMarkers(g) {
+    if (!ov || !frame || loadState !== 'ok') return;
+    const geo = g || geometry();
+    const byHash = new Map();
+    for (const a of geo) byHash.set(hashOf(a.file), a);
+    let fr;
+    try { fr = frame.getBoundingClientRect(); } catch (e) { return; }
+    const seen = new Set();
+    const docked = [];
+    for (const p of pins) {
+      const a = byHash.get(p.hash) || null;
+      let x = null, y = null;
+      if (a) {
+        x = a.box.left + p.fx * a.box.width - fr.left;
+        y = a.box.top + p.fy * a.box.height - fr.top;
+        if (x < 2 || y < 2 || x > fr.width - 2 || y > fr.height - 2) { x = null; y = null; }
+      }
+      if (x == null) { docked.push({ p: p, why: a ? 'off-screen' : 'absent' }); continue; }
+      seen.add(p.id);
+      let m = markerEls.get(p.id);
+      if (!m) {
+        m = btn('dc-mk', '');
+        m.setAttribute('aria-label', 'Pin: ' + (p.label || p.id));
+        m.appendChild(icon('pin'));
+        m.addEventListener('click', (e) => {
+          e.stopPropagation();
+          openPinPop(p, e.clientX, e.clientY, geoFor(p.hash), null);
+        });
+        ov.appendChild(m);
+        markerEls.set(p.id, m);
+      }
+      const dr = drifted(p, a);
+      m.className = 'dc-mk' + (pinTone(p) ? ' ' + pinTone(p) : '') + (dr ? ' drift' : '');
+      m.title = (p.shared ? '' : '(private) ') + (p.text || p.label || 'pin') +
+        (dr ? '  —  may have moved: this artboard changed since the pin was placed.' : '');
+      m.style.left = x + 'px';
+      m.style.top = y + 'px';
+    }
+    for (const entry of Array.from(markerEls)) {
+      if (!seen.has(entry[0])) { entry[1].remove(); markerEls.delete(entry[0]); }
+    }
+    paintDock(docked);
+  }
+
+  // A pin whose artboard is not in view is DOCKED, never dropped (CONTRACT §5.2).
+  function paintDock(docked) {
+    if (!dockNode) return;
+    const sig = docked.map((d) => d.p.id + d.why + (d.p.shared ? 's' : 'p')).join('|');
+    if (dockNode._sig === sig) return;
+    dockNode._sig = sig;
+    dockNode.replaceChildren();
+    if (!docked.length) return;
+    const h = el('div', 'dc-dock-h', docked.length + ' pin' + (docked.length === 1 ? '' : 's') + ' off screen');
+    h.title = 'These pins sit on artboards that are not in view. This build cannot recentre the canvas for you — pan or zoom to them yourself.';
+    dockNode.appendChild(h);
+    for (const d of docked.slice(0, 8)) {
+      const b = btn('dc-dk', '');
+      b.appendChild(el('span', 'dc-dot' + (pinTone(d.p) ? ' ' + pinTone(d.p) : '')));
+      b.appendChild(el('span', 't', d.p.label || d.p.text || 'pin'));
+      b.title = (d.why === 'absent'
+        ? 'That artboard is not on this canvas any more.'
+        : 'That artboard is off screen.') + ' Clicking cannot recentre the canvas in this build.';
+      b.addEventListener('click', (e) => { e.stopPropagation(); openPinPop(d.p, e.clientX, e.clientY, null, d.why); });
+      dockNode.appendChild(b);
+    }
+    if (docked.length > 8) dockNode.appendChild(el('div', 'dc-dock-h', '+' + (docked.length - 8) + ' more'));
+  }
+
+  function openPinPop(p, cx, cy, a, why) {
+    const pop = el('div', 'dc-pop');
+    const head = el('div', 'dc-pop-h');
+    head.appendChild(icon('pin'));
+    head.appendChild(el('span', 'a', p.label || 'pin'));
+    head.appendChild(el('span', 'dc-sp'));
+    head.appendChild(el('span', null, p.shared ? 'shared' : 'private'));
+    pop.appendChild(head);
+    pop.appendChild(el('div', 'dc-pop-t', p.text || '(no text)'));
+    for (const r of p.replies) {
+      const rr = el('div', 'dc-pop-r');
+      rr.appendChild(el('i', null, r.author === 'claude' ? 'Claude' : 'you'));
+      rr.appendChild(document.createTextNode(r.text));
+      pop.appendChild(rr);
+    }
+    // No reveal() in this build (CONTRACT §4.6): say so rather than dead-click.
+    if (why === 'absent') pop.appendChild(el('div', 'dc-fine',
+      'Its artboard is not on this canvas any more, so there is nowhere to point: reseed if the file is back, otherwise this pin has outlived what it was about.'));
+    else if (why === 'off-screen') pop.appendChild(el('div', 'dc-fine',
+      'Its artboard is off screen, and this build cannot recentre the canvas — pan or zoom to it yourself.'));
+    if (drifted(p, a)) pop.appendChild(el('div', 'dc-fine',
+      'May have moved: this artboard changed since the pin was placed, so the point under the marker may not be what was meant.'));
+
+    const ta = el('textarea', 'dc-ta');
+    ta.setAttribute('rows', '2');
+    ta.setAttribute('placeholder', 'Reply…');
+    ta.setAttribute('data-no-persist', '');
+    pop.appendChild(ta);
+    const row = el('div', 'dc-row');
+    const del = btn('dc-btn dc-btn-s', 'Remove');
+    del.addEventListener('click', async () => {
+      closePop();
+      try {
+        const r = await fetch('/api/comments/' + encodeURIComponent(p.id), { method: 'DELETE' });
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        flash('Pin removed.');
+      } catch (e) { flash('Could not remove that pin: ' + s(e && e.message), true); }
+      pollPins();
+    });
+    row.appendChild(del);
+    row.appendChild(el('span', 'dc-sp'));
+    const send = btn('dc-btn dc-btn-s dc-btn-go', 'Reply');
+    send.addEventListener('click', async () => {
+      const text = ta.value.trim();
+      if (!text) return;
+      closePop();
+      try {
+        const r = await fetch('/api/comments/' + encodeURIComponent(p.id) + '/reply', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ text: text, author: 'user' }),
+        });
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        flash('Replied on ' + p.id + '.');
+      } catch (e) { flash('Could not reply: ' + s(e && e.message), true); }
+      pollPins();
+    });
+    row.appendChild(send);
+    pop.appendChild(row);
+    showPop(pop, cx, cy);
+  }
+
+  function showPop(pop, cx, cy) {
+    closePop();
+    if (!wrapNode) return;
+    popEl = pop;
+    wrapNode.appendChild(pop);
+    let wr;
+    try { wr = wrapNode.getBoundingClientRect(); } catch (e) { wr = { left: 0, top: 0, width: 320, height: 320 }; }
+    const w = pop.offsetWidth || 268, h = pop.offsetHeight || 170;
+    pop.style.left = Math.max(6, Math.min((cx - wr.left) + 8, wr.width - w - 6)) + 'px';
+    pop.style.top = Math.max(6, Math.min((cy - wr.top) + 8, wr.height - h - 6)) + 'px';
+    document.addEventListener('pointerdown', onOutsidePop, true);
+  }
+  function closePop() {
+    if (!popEl) return;
+    popEl.remove();
+    popEl = null;
+    document.removeEventListener('pointerdown', onOutsidePop, true);
+  }
+  function onOutsidePop(e) {
+    if (!popEl) { document.removeEventListener('pointerdown', onOutsidePop, true); return; }
+    const path = e.composedPath ? e.composedPath() : [];
+    if (path.indexOf(popEl) >= 0) return;
+    closePop();
+  }
+
+  // Re-project on every geometry change: pan, zoom, focus mode, a pane resize, a
+  // window resize. The pump measures at most every 60 ms and only while there is
+  // something to keep in place.
+  function pump() {
+    rafId = 0;
+    if (!alive()) return stopAll();
+    if (loadState !== 'ok' || (!pins.length && !armed)) return;
+    const now = Date.now();
+    if (now - lastMeasure >= 60) {
+      lastMeasure = now;
+      const g = geometry();
+      const sig = geomSig(g);
+      if (sig !== lastGeomSig) { lastGeomSig = sig; layoutMarkers(g); }
+    }
+    schedulePump();
+  }
+  function schedulePump() {
+    if (rafId || !alive()) return;
+    try { rafId = requestAnimationFrame(pump); } catch (e) { rafId = 0; }
+  }
+  function onResize() {
+    if (!alive()) { window.removeEventListener('resize', onResize); return; }
+    lastGeomSig = '';
+    schedulePump();
+  }
+
+  // ═════════════════════════════════════════════════════════════════════════
+  // DELIVERY (CONTRACT §7)
+  // ═════════════════════════════════════════════════════════════════════════
+  // Split for two reasons, both real. A literal script tag would end this script
+  // early, because the shell parses pane html with the HTML parser. And the
+  // fully quoted form of that id attribute is one of the upstream markers
+  // scripts/check-no-vendored.mjs fails a tracked file for — so this pane
+  // recognises the payload without ever writing that literal down (CONTRACT §9.1).
+  const DOC_MARK = '<' + 'script type="application/json" id="appifact-doc';
+  function docBlock(src) {
+    const i = src.indexOf(DOC_MARK);
+    if (i < 0) return null;
+    const gt = src.indexOf('>', i);
+    if (gt < 0) return null;
+    const end = src.indexOf('<' + '/script>', gt);
+    return src.slice(gt + 1, end < 0 ? Math.min(src.length, gt + 8193) : end);
+  }
+  // CONTRACT §5.4 / FINDINGS §4: a page whose state block still carries
+  // store:"db" boots read-only against a live store no matter what a host
+  // provides — it is a claude.ai/design canvas, not ours. Seeding DELETES
+  // state.store, so a seeded canvas never has it. Top-level keys come first in
+  // the serialised block, and a `"store":"db"` occurring inside a nested JSON
+  // string would be backslash-escaped, which is what the leading guard excludes.
+  // The whole block is scanned, not a prefix: key order is the payload's choice,
+  // not ours, and a linear pass over even a 2 MB block costs a millisecond.
+  function looksLiveStore(block) {
+    return /(^|[^\\])"store"\s*:\s*"db"/.test(block);
+  }
+
+  async function ensureLoad() {
+    if (IS_PREVIEW || !SECURE) return;
+    const c = canvas;
+    if (!c || c.ok === false || s(c.state) !== 'ready') return;
+    const name = s(c.payload_component);
+    if (!name) { loadState = 'noname'; repaint(); return; }
+    // CONTRACT §9.2, enforced where the bytes are CHOSEN rather than assumed.
+    //
+    // Whatever comes back from GET /api/components/<name> is mounted as an
+    // UNSANDBOXED, SAME-ORIGIN srcdoc — the realm §9.3 describes, which reads
+    // private pins with their text (GET /api/comments without shared_only),
+    // forges pins into my context (the `comment` branch of policy.classify has
+    // no source gate and routing:'none' does not suppress it) and can POST
+    // /api/packs/install. §9.2 is the invariant that makes that survivable, so
+    // this pane must only ever mount the carrier its OWN service wrote.
+    //
+    // `payload_component` does not carry that guarantee on its own. It is an
+    // ordinary store value, and the store is writable by anything that can
+    // reach POST /api/store — Claude, a local driver process, another pane, and
+    // (same-origin) the canvas frame itself. Unchecked, one store write points
+    // this pane at any component in the registry and gets its source executed
+    // in the daemon's trust realm. The name grammar is the containment rule,
+    // exactly as it is for the components route itself (routes/components.js
+    // `resolvable`, which is why traversal is not also a concern here).
+    //
+    // !! KEEP IN SYNC with service.js CARRIER_RE / carrierNameFor() !!
+    // `design-canvas-payload` is the CONTRACT §2.1 base; the 8-hex suffix is
+    // the mount hash the service appends so two panes on one node cannot
+    // clobber each other's payload.
+    if (!/^design-canvas-payload(-[0-9a-f]{8})?$/.test(name)) {
+      loadedKey = null;
+      loadState = 'badname';
+      loadErr = capFrame(name);   // never let an unbounded store value sit in loadErr
+      repaint();
+      return;
+    }
+    // Keyed on the SEED, not on dsn_canvas.seq — seq is bumped on every write,
+    // and re-fetching 2.4 MB (and resetting the user's pan and zoom) because a
+    // file's mtime changed would be its own bug.
+    const key = name + '@' + s(c.seeded_at);
+    if (key === loadedKey) return;          // set before the first await: re-entry guard
+    loadedKey = key;
+    loadState = 'loading'; loadErr = ''; booted = null;
+    repaint();
+    let src = '';
+    try {
+      const r = await fetch('/api/components/' + encodeURIComponent(name), { headers: { accept: 'application/json' } });
+      if (!r.ok) { loadState = 'http'; loadErr = 'HTTP ' + r.status; repaint(); return; }
+      const j = await r.json();
+      src = typeof j.source === 'string' ? j.source : '';
+    } catch (e) {
+      loadState = 'net'; loadErr = s(e && e.message); repaint(); return;
+    }
+    if (!alive()) return;
+    if (!src) { loadState = 'empty'; repaint(); return; }
+    const block = docBlock(src);
+    if (block === null) { src = ''; loadState = 'not-canvas'; repaint(); return; }
+    if (looksLiveStore(block)) { src = ''; loadState = 'live-store'; repaint(); return; }
+
+    loadState = 'ok';
+    paintStage();               // attaches the wrap before the frame goes into it
+    mountFrame(src);
+    src = '';                   // drop our reference: the frame owns those bytes now
+    srcHashes.clear();
+    lastGeomSig = '';
+    paintHead();
+    probeCanvas();
+    if (!pollTimer) {
+      pollTimer = setInterval(() => {
+        if (!alive()) return stopAll();
+        if (document.visibilityState === 'hidden') return;
+        pollPins();
+      }, 4000);
+    }
+    pollPins();
+  }
+
+  // ═════════════════════════════════════════════════════════════════════════
+  // WIRING
+  // ═════════════════════════════════════════════════════════════════════════
+  function readStore() {
+    let c = null, f = null;
+    try { c = store.get('dsn_canvas'); } catch (e) {}
+    try { f = store.get('dsn_files'); } catch (e) {}
+    if (obj(c) && accept('dsn_canvas', c)) canvas = c;
+    if (obj(f) && accept('dsn_files', f)) files = f;
+  }
+  function onCanvas(v) {
+    if (!alive() || !obj(v) || !accept('dsn_canvas', v)) return;
+    const prev = canvas;
+    canvas = v;
+    if (!prev || prev.seeded_at !== v.seeded_at || prev.payload_component !== v.payload_component) {
+      srcHashes.clear();
+    }
+    // Leaving `ready` tears the frame down, so the load must be re-armed or
+    // coming back to the same seed would leave an empty wrap on screen.
+    if (s(v.state) !== 'ready' || v.ok === false) { loadedKey = null; loadState = 'idle'; }
+    run();
+  }
+  function onFiles(v) {
+    if (!alive() || !obj(v) || !accept('dsn_files', v)) return;
+    files = v;
+    paintHead();
+  }
+
+  // Everything async lives inside this call. Top-level `await` here would be a
+  // SyntaxError under `new Function` and the whole pane would never run — the
+  // failure mode that shows up as a pane that renders its markup and nothing
+  // else (CONTRACT §5.1).
+  function repaint() { paintHead(); paintStage(); }
+  function run() {
+    repaint();
+    (async () => {
+      try { await ensureLoad(); } catch (e) { console.error('design-canvas load', e); }
+    })();
+  }
+
+  readStore();
+  try {
+    store.subscribe('dsn_canvas', onCanvas);
+    store.subscribe('dsn_files', onFiles);
+  } catch (e) { console.error('design-canvas subscribe', e); }
+  window.addEventListener('resize', onResize);
+  setTimeout(() => { if (alive() && !canvas) { escalated = true; repaint(); } }, 6000);
+  run();
+</script>

@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64" role="img" aria-label="Ridgeline mark">
+  <rect width="64" height="64" rx="14" fill="#1c1a17"/>
+  <path d="M9 45 L23 23 L32.5 36 L41 25 L55 45 Z" fill="none" stroke="#f3efe7" stroke-width="3.5" stroke-linejoin="round" stroke-linecap="round"/>
+  <circle cx="45.5" cy="16.5" r="4.5" fill="#a34b28"/>
+</svg>

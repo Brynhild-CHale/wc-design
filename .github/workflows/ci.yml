@@ -1,0 +1,429 @@
+# ---------------------------------------------------------------------------
+# CI for wc-design.
+#
+# This runner has NO Claude Code and NO Claude Design payload, and it must stay
+# that way: the pack wraps Anthropic's canvas editor and ships none of it
+# (CONTRACT §9.1). So CI verifies everything that can be verified without the
+# payload, and proves that the payload-dependent tests SKIP rather than fail.
+#
+# Three gates, in order of importance:
+#   1. tripwire   — no upstream bytes in any tracked file  (CONTRACT §8.4, §9.1)
+#   2. leak-scan  — no personal data in any tracked file   (CONTRACT §9.6)
+#   3. test       — npm test + npm run lint:pack on Node 20 and 22 (§8.3, §8.4)
+#
+# No secrets, no publish step, no network beyond the checkout and Node install.
+# Actions are pinned to exact release tags; bump them deliberately.
+# ---------------------------------------------------------------------------
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  # =========================================================================
+  # THE TRIPWIRE. The most important job in this repository.
+  #
+  # wc-design is only publishable while it contains zero bytes of Anthropic's
+  # canvas editor. That is enforced mechanically, not by care: a stray `cp`
+  # while debugging or an over-eager `git add -A` is all it takes.
+  # If this job is red, DO NOT MERGE and DO NOT PUBLISH.
+  # =========================================================================
+  tripwire:
+    name: 'TRIPWIRE · zero upstream bytes'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4.2.2
+
+      - uses: actions/setup-node@v4.1.0
+        with:
+          node-version: '20'
+
+      - name: The tripwire must have something to check
+        run: |
+          tracked=$(git ls-files | wc -l | tr -d ' ')
+          echo "tracked files: $tracked"
+          if [ "$tracked" -lt 1 ]; then
+            echo "::error title=Tripwire cannot run::git ls-files returned nothing, so scripts/check-no-vendored.mjs would pass vacuously."
+            exit 1
+          fi
+
+      - name: No tracked file may be, or contain, upstream payload content
+        run: |
+          set -o pipefail
+          if node scripts/check-no-vendored.mjs 2>&1 | tee "$RUNNER_TEMP/tripwire.log"; then
+            :
+          else
+            {
+              echo '## :rotating_light: TRIPWIRE FAILED — upstream bytes in the repository'
+              echo
+              echo 'A tracked file matched an upstream sha256 from `upstream.lock.json`,'
+              echo 'carried an upstream marker, or exceeded the 256 KB ceiling.'
+              echo
+              echo '```'
+              cat "$RUNNER_TEMP/tripwire.log"
+              echo '```'
+              echo
+              echo '**This repository must ship zero upstream bytes (CONTRACT §9.1).**'
+              echo 'Remove the file, add it to `.gitignore`, and let'
+              echo '`scripts/find-payload.mjs` read the local install at runtime instead.'
+              echo 'Do not merge and do not publish until this job is green.'
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::error title=TRIPWIRE FAILED: upstream bytes in the repository::A tracked file is (or contains) Claude Design payload content. wc-design must ship zero upstream bytes - CONTRACT 9.1. See the job summary. DO NOT MERGE, DO NOT PUBLISH."
+            exit 1
+          fi
+          # The script exits 0 with a stderr notice when git is unavailable.
+          # Treat that as a failure here: a silent no-op tripwire is worse than none.
+          if ! grep -q 'check-no-vendored ok' "$RUNNER_TEMP/tripwire.log"; then
+            echo "::error title=Tripwire did not actually run::check-no-vendored.mjs exited 0 without reporting a clean scan."
+            cat "$RUNNER_TEMP/tripwire.log"
+            exit 1
+          fi
+
+      - name: The tripwire itself must not be vacuous
+        run: |
+          # Plant a tracked file that violates the size ceiling and confirm the
+          # tripwire rejects it. Guards against a check that passes because its
+          # rules stopped matching anything.
+          probe='.tripwire-probe.txt'
+          head -c 300000 /dev/zero | tr '\0' 'x' > "$probe"
+          git add -f -- "$probe"
+          status=0
+          if node scripts/check-no-vendored.mjs > "$RUNNER_TEMP/probe.log" 2>&1; then
+            echo "::error title=Tripwire is vacuous::check-no-vendored.mjs accepted a 300 KB tracked file. Its rules are not firing."
+            cat "$RUNNER_TEMP/probe.log"
+            status=1
+          else
+            echo 'tripwire correctly rejected an oversized tracked file:'
+            cat "$RUNNER_TEMP/probe.log"
+          fi
+          git rm -q --cached -- "$probe"
+          rm -f "$probe"
+          exit "$status"
+
+      - name: Summary
+        if: success()
+        run: |
+          {
+            echo '## :white_check_mark: Tripwire green'
+            echo
+            echo '```'
+            cat "$RUNNER_TEMP/tripwire.log"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # =========================================================================
+  # CONTRACT §9.6 — no personal data in any tracked file.
+  #
+  # The scanner is generated into the runner temp dir, but its source lives in
+  # this workflow, which is itself a tracked file the scan reads. So every
+  # pattern is assembled from fragments: the rules cannot match their own
+  # definition, and a self-test proves they still match real leaks.
+  # =========================================================================
+  leak-scan:
+    name: 'Leak scan · no personal data'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4.2.2
+
+      - uses: actions/setup-node@v4.1.0
+        with:
+          node-version: '20'
+
+      - name: Generate the scanner
+        run: |
+          cat > "$RUNNER_TEMP/leak-scan.mjs" <<'LEAKSCAN'
+          // leak-scan — CONTRACT §9.6: no absolute home paths, no email addresses,
+          // no machine-specific temp paths in any tracked file.
+          //
+          //   node leak-scan.mjs               scan `git ls-files` in cwd
+          //   node leak-scan.mjs --self-test   prove the rules still fire
+          //   node leak-scan.mjs <file>...     scan named files
+          import { execFileSync } from 'node:child_process';
+          import { readFileSync } from 'node:fs';
+
+          // Fragments, never whole literals: this source is embedded in a tracked
+          // file that the scan reads, and a rule that matched itself would make the
+          // whole job unfixable.
+          const P = (...s) => s.join('');
+          const SEG = '[A-Za-z0-9._-]';  // a real path segment. `<placeholder>` never matches.
+
+          const RULES = [
+            {
+              id: 'absolute-home-path',
+              fix: 'use /path/to/... or ~ instead (CONTRACT §9.6)',
+              re: new RegExp([
+                P('/Us', 'ers/') + SEG + '+',
+                P('/ho', 'me/') + SEG + '+',
+                '[A-Za-z]:\\\\' + P('Us', 'ers') + '\\\\' + SEG + '+',
+              ].join('|'), 'g'),
+            },
+            {
+              id: 'email-address',
+              fix: 'remove it, or use a role address at example.com',
+              re: /[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}/g,
+              allow: (m) => (
+                /^git@github\.com$/i.test(m) ||
+                /^(?:no-?reply)@/i.test(m) ||
+                /@(?:example\.(?:com|org|net)|localhost|users\.noreply\.github\.com)$/i.test(m) ||
+                // asset@2x.png and friends are filenames, not addresses.
+                /\.(?:png|jpe?g|gif|webp|avif|bmp|svg|html?|json|mjs|cjs|jsx?|tsx?|css|md|txt|ya?ml|lock)$/i.test(m)
+              ),
+            },
+            {
+              id: 'machine-specific-temp-path',
+              fix: 'the payload path is resolved at runtime; document it as <tmp>/claude-<uid>/...',
+              re: new RegExp([
+                P('/tm', 'p/claude-') + '[0-9]+',      // uid-scoped temp root
+                P('/var/fol', 'ders/') + '[A-Za-z0-9_+]+',  // macOS per-user temp
+                P('-Us', 'ers-') + '[A-Za-z0-9]' + SEG + '*', // path-mangled home dir
+                '/[0-9a-f]{32}/',                      // materialisation nonce
+              ].join('|'), 'g'),
+            },
+          ];
+
+          function findings(text, where) {
+            const out = [];
+            const lines = text.split(/\r?\n/);
+            for (let i = 0; i < lines.length; i++) {
+              for (const rule of RULES) {
+                rule.re.lastIndex = 0;
+                for (const m of lines[i].matchAll(rule.re)) {
+                  if (rule.allow && rule.allow(m[0])) continue;
+                  out.push({ where, line: i + 1, rule, match: m[0] });
+                }
+              }
+            }
+            return out;
+          }
+
+          // Enough to locate it, not enough to republish it in a public CI log.
+          const mask = (s) => (s.length <= 10 ? s.slice(0, 3) + '...' : s.slice(0, 5) + '...' + s.slice(-3));
+
+          function selfTest() {
+            const mustFlag = [
+              [P('/Us', 'ers/', 'jdoe', '/Dev/wc-design'), 'absolute-home-path'],
+              [P('/ho', 'me/', 'jdoe', '/src'), 'absolute-home-path'],
+              ['see ' + 'C:\\' + P('Us', 'ers') + '\\jdoe', 'absolute-home-path'],
+              ['jdoe' + '@' + 'some-personal-domain.io', 'email-address'],
+              [P('/tm', 'p/claude-', '501'), 'machine-specific-temp-path'],
+              [P('/var/fol', 'ders/', 'q7', '/xyz'), 'machine-specific-temp-path'],
+              [P('/private/tm', 'p/claude-', '501', '/-Us', 'ers-', 'jdoe', '-Dev'), 'machine-specific-temp-path'],
+              ['/scratch/' + '0123456789abcdef0123456789abcdef' + '/design/', 'machine-specific-temp-path'],
+            ];
+            const mustPass = [
+              P('/Us', 'ers/', '<you>', '/project'),   // documented placeholder
+              '/path/to/canvas',
+              '~/Designs/poster',
+              'you' + '@' + 'example.com',
+              'no' + 'reply' + '@' + 'anthropic.com',
+              P('<tmp>/claude-', '<uid>', '/bundled-skills/<version>/<nonce>/design/'),
+              'logo' + '@' + '2x.png',
+              '"@anthropic' + '-ai/claude-code": "^2.1.0"',
+              'sha256 76a2b0a4e5d4efccc9b8c825ed70aa320179cbc95541755be2af50bfd6d36196',
+            ];
+            let bad = 0;
+            for (const [sample, ruleId] of mustFlag) {
+              const hits = findings(sample, 'self-test').filter((f) => f.rule.id === ruleId);
+              if (!hits.length) { console.error(`self-test: rule ${ruleId} FAILED to flag ${mask(sample)}`); bad++; }
+            }
+            for (const sample of mustPass) {
+              const hits = findings(sample, 'self-test');
+              if (hits.length) { console.error(`self-test: false positive on ${JSON.stringify(sample)} (${hits[0].rule.id})`); bad++; }
+            }
+            if (bad) { console.error(`\nleak-scan self-test FAILED (${bad} problem(s)) — the scanner is not trustworthy.`); process.exit(1); }
+            console.log(`leak-scan self-test ok — ${mustFlag.length} leaks caught, ${mustPass.length} safe strings passed`);
+          }
+
+          function trackedFiles() {
+            return execFileSync('git', ['ls-files', '-z'], { maxBuffer: 64 * 1024 * 1024 })
+              .toString('utf8').split('\0').filter(Boolean);
+          }
+
+          const args = process.argv.slice(2);
+          if (args.includes('--self-test')) { selfTest(); process.exit(0); }
+
+          const files = args.length ? args : trackedFiles();
+          if (!files.length) { console.error('leak-scan: no files to scan'); process.exit(1); }
+
+          const problems = [];
+          let scanned = 0;
+          for (const rel of files) {
+            let buf;
+            try { buf = readFileSync(rel); } catch { continue; }
+            if (buf.includes(0)) continue;  // binary
+            scanned++;
+            problems.push(...findings(buf.toString('utf8'), rel));
+          }
+
+          if (problems.length) {
+            console.error('leak-scan FAILED\n');
+            for (const p of problems) {
+              console.error(`  ${p.where}:${p.line}  ${p.rule.id}  ->  ${mask(p.match)}`);
+            }
+            console.error('\nFix:');
+            for (const rule of RULES) {
+              if (problems.some((p) => p.rule.id === rule.id)) console.error(`  ${rule.id}: ${rule.fix}`);
+            }
+            console.error('\nCONTRACT §9.6: no absolute home paths, usernames, emails or account');
+            console.error('names in any tracked file. Matches above are masked on purpose.');
+            process.exit(1);
+          }
+
+          console.log(`leak-scan ok — ${scanned} text files scanned, no personal data`);
+          LEAKSCAN
+          echo "wrote $RUNNER_TEMP/leak-scan.mjs"
+
+      - name: The scanner must still catch a real leak
+        run: node "$RUNNER_TEMP/leak-scan.mjs" --self-test
+
+      - name: No personal data in tracked files
+        run: |
+          if ! node "$RUNNER_TEMP/leak-scan.mjs" 2>&1 | tee "$RUNNER_TEMP/leak-scan.log"; then
+            {
+              echo '## :no_entry: Leak scan failed — personal data in a tracked file'
+              echo
+              echo '```'
+              cat "$RUNNER_TEMP/leak-scan.log"
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::error title=Leak scan failed::A tracked file carries an absolute home path, an email address, or a machine-specific temp path - CONTRACT 9.6. See the job summary."
+            exit 1
+          fi
+
+  # =========================================================================
+  # The test matrix. Node 20 (the floor: CONTRACT targets >= 20) and Node 22.
+  # =========================================================================
+  test:
+    name: 'test · node ${{ matrix.node }}'
+    needs: [tripwire]
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ['20', '22']
+    steps:
+      - uses: actions/checkout@v4.2.2
+
+      - uses: actions/setup-node@v4.1.0
+        with:
+          node-version: ${{ matrix.node }}
+          # No `cache: npm`: this pack has no runtime dependencies and may carry
+          # no lockfile, and the cache step hard-fails when it finds neither.
+
+      - name: This runner must be payload-free
+        run: |
+          node -v
+          npm -v
+          # find-payload exits non-zero when the Claude Design payload is absent.
+          # On a GitHub runner it always is - that absence is the point of this
+          # job, because it is what makes the skip assertions below meaningful.
+          if node scripts/find-payload.mjs --json > "$RUNNER_TEMP/payload.json" 2>&1; then
+            echo "::error title=Unexpected payload on the runner::A Claude Design payload was resolved here, so the payload-absent skip path is not being exercised."
+            head -c 2000 "$RUNNER_TEMP/payload.json"
+            exit 1
+          fi
+          echo 'no Claude Design payload on this runner (expected):'
+          head -c 2000 "$RUNNER_TEMP/payload.json"
+
+      - name: Install
+        run: |
+          if [ ! -f package.json ]; then
+            echo "::error title=No package.json::CONTRACT §8 requires \`npm test\` and \`npm run lint:pack\`."
+            exit 1
+          fi
+          if [ -f package-lock.json ]; then
+            npm ci --no-audit --no-fund
+          else
+            npm install --no-audit --no-fund
+          fi
+
+      - name: npm test  (runs the tripwire — CONTRACT §8.4)
+        run: |
+          set -o pipefail
+          npm test 2>&1 | tee "$RUNNER_TEMP/npm-test.log"
+
+      - name: npm test must include the tripwire
+        run: |
+          # Not just "the script names it" — the tripwire's own clean-scan line
+          # has to be in the output, so a green `npm test` cannot mean it no-opped.
+          if ! grep -q 'check-no-vendored ok' "$RUNNER_TEMP/npm-test.log"; then
+            echo "::error title=npm test did not run the tripwire::CONTRACT §8.4: \`npm test\` must run scripts/check-no-vendored.mjs and it must report a clean scan."
+            exit 1
+          fi
+          echo 'ok - the tripwire ran inside npm test'
+
+      - name: npm run lint:pack
+        run: npm run lint:pack
+
+      - name: Payload-dependent tests must SKIP, not fail
+        run: |
+          # CI has no Claude Code install, so anything that needs the payload
+          # (CONTRACT §8.2, the Uc port proof) has to skip with a clear message
+          # rather than fail. Assert that directly against TAP output.
+          TESTS=()
+          while IFS= read -r -d '' f; do TESTS+=("$f"); done \
+            < <(git ls-files -z -- '*.test.mjs' '*.test.js' '*.test.cjs')
+          if [ "${#TESTS[@]}" -eq 0 ]; then
+            echo "::error title=No test files::CONTRACT §8 requires a test harness (test/uc-port.test.mjs at minimum)."
+            exit 1
+          fi
+          printf 'test files:\n'; printf '  %s\n' "${TESTS[@]}"
+          rc=0
+          node --test --test-reporter=tap "${TESTS[@]}" > "$RUNNER_TEMP/tap.log" 2>&1 || rc=$?
+          cat "$RUNNER_TEMP/tap.log"
+          if [ "$rc" -ne 0 ]; then
+            echo "::error title=Tests failed without the payload::Payload-dependent tests must skip when Claude Design is absent, not fail. CONTRACT 8.2."
+            exit 1
+          fi
+          if ! grep -qE '^# fail 0' "$RUNNER_TEMP/tap.log"; then
+            echo "::error title=Tests reported failures::Payload-dependent tests must skip when Claude Design is absent, not fail."
+            exit 1
+          fi
+          if grep -qE '^# skipped [1-9]' "$RUNNER_TEMP/tap.log" || grep -qE '# SKIP' "$RUNNER_TEMP/tap.log"; then
+            echo 'ok - payload-dependent tests skipped cleanly'
+          else
+            echo "::error title=Nothing skipped::No test skipped, yet the payload is absent. Either the payload-dependent tests are missing, or they silently pass without exercising anything."
+            exit 1
+          fi
+          {
+            echo "### Node ${{ matrix.node }} — payload-absent test run"
+            echo
+            echo '```'
+            grep -E '^# (tests|pass|fail|cancelled|skipped|todo) ' "$RUNNER_TEMP/tap.log" || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # Single required check for branch protection.
+  ci:
+    name: 'CI green'
+    needs: [tripwire, leak-scan, test]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Gate
+        run: |
+          echo "tripwire:  ${{ needs.tripwire.result }}"
+          echo "leak-scan: ${{ needs.leak-scan.result }}"
+          echo "test:      ${{ needs.test.result }}"
+          if [ "${{ needs.tripwire.result }}" != 'success' ]; then
+            echo "::error title=Not publishable::The upstream-bytes tripwire is not green. DO NOT MERGE, DO NOT PUBLISH."
+            exit 1
+          fi
+          if [ "${{ needs.leak-scan.result }}" != 'success' ] || [ "${{ needs.test.result }}" != 'success' ]; then
+            exit 1
+          fi
+          echo 'all gates green'

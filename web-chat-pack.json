@@ -1,0 +1,11 @@
+{
+  "name": "wc-design",
+  "version": "0.1.0",
+  "description": "A live Claude Design canvas on the web-chat surface, seeded from the .dc.html working files in a directory you name and re-seeded by its host service whenever those files change, with ordinary web-chat comment pins anchored over the artboards - reach for it to look at, talk about and iterate on a design that already exists on disk, remembering that v0.1.0 is view-and-comment only (no in-pane save - the editor boots read-only, so the .dc.html files on disk stay the only source of truth and you change a design by editing them and letting the pane re-seed; pins land per artboard rather than per element; and isolate mode turns pins off entirely), and that the pack ships none of Anthropic's code - the canvas editor is read at runtime from the copy Claude Code already wrote on this machine, so a machine that has never run /design has nothing to show.",
+  "requires": {
+    "web-chat": ">=0.7.0"
+  },
+  "components": [
+    "design-canvas"
+  ]
+}

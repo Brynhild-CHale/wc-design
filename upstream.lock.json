@@ -1,0 +1,19 @@
+{
+  "_comment": [
+    "Provenance for the Claude Design payload this pack wraps. FINGERPRINTS ONLY —",
+    "no upstream bytes are stored here or anywhere else in this repository.",
+    "scripts/check-no-vendored.mjs fails CI if any tracked file matches these hashes."
+  ],
+  "claude_code_version": "2.1.263",
+  "payload_file": "payload.template.html",
+  "payload_sha256": "76a2b0a4e5d4efccc9b8c825ed70aa320179cbc95541755be2af50bfd6d36196",
+  "payload_bytes": 2488483,
+  "helper_file": "seed-canvas.mjs",
+  "helper_sha256": "31a2a1528c7a30b624b7370cc542d8378a3643d97cc14ff3e6a4bce842878cd8",
+  "helper_bytes": 40699,
+  "tested_against": {
+    "web-chat": "0.7.5",
+    "node": "v24.18.0"
+  },
+  "notes": "Regenerate with `node scripts/relock.mjs` after verifying the canvas pane still mounts."
+}

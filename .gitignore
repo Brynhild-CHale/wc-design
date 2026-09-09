@@ -1,0 +1,29 @@
+# ---------------------------------------------------------------------------
+# The Claude Design payload is NEVER committed. It is Anthropic's proprietary
+# editor code, materialised at runtime from the user's own Claude Code install.
+# Anything matching these patterns is upstream bytes and must stay untracked.
+# ---------------------------------------------------------------------------
+payload.template.html
+seed-canvas.mjs
+*.payload.html
+
+# Seeded canvases (contain the payload inline — ~2.4 MB each).
+# The service writes only under .wc-design-build/ (CONTRACT §6.3), but the
+# helper's own --out is a TITLE SLUG — `spring-menu-poster.html` — so a canvas
+# seeded by hand lands at the repo root under a name no pattern predicts.
+# Ignore every root-level .html: nothing tracked lives there, and every
+# component.html sits under components/, which this does not touch.
+/*.html
+*.canvas.html
+.wc-design-build/
+
+# Working design files people generate locally.
+# `scratch/*` rather than `scratch/` on purpose: git cannot re-include a file
+# whose parent directory is excluded, and one file in here IS source —
+# anchor-lib.js is the anchor grammar of CONTRACT §4.2, the subject of
+# test/uc-port.test.mjs (§8.2) and the text inlined into the pane. Ignored, a
+# fresh clone fails seven tests instead of running them.
+scratch/*
+!scratch/anchor-lib.js
+node_modules/
+.DS_Store
