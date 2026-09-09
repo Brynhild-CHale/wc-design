@@ -5,16 +5,23 @@ The authoritative interface between the pack's pieces. `service.js`,
 file**; where an implementation and this document disagree, this document is
 wrong and must be changed deliberately, not worked around.
 
-Companion: `FINDINGS.md` (the research this rests on). Section references like
-"§6" point there.
+Companion: `FINDINGS.md` (the research this rests on). A bare `§N` or `§N.M`
+is a section of **this** file; a reference to the research is written out —
+`FINDINGS §6`.
 
-Target: `claude-web-chat` **>= 0.7.0** (see §9.4), Node **>= 20.13.0**.
+Target: `claude-web-chat` **>= 0.7.0** (see §9.4), Node **>= 20** — the floor
+`package.json` declares and CI tests.
 
-> The Node floor is 20.13.0, not 20.0.0: the service uses `fs.watch` with
-> `recursive: true`, which only landed on **Linux** in 20.13.0. On 20.0–20.12 it
-> throws `ERR_FEATURE_UNAVAILABLE_ON_PLATFORM`, which surfaces as a service that
-> dies at start rather than a pane that degrades — the worst failure shape.
-> Either hold the floor or ship a non-recursive fallback; do not silently allow 20.0.
+> An earlier draft of this document required Node 20.13.0, because `fs.watch`
+> with `recursive: true` only landed on **Linux** in that release and throws
+> `ERR_FEATURE_UNAVAILABLE_ON_PLATFORM` below it — a service that dies at start
+> rather than a pane that degrades, the worst failure shape. That note offered
+> two ways out and the implementation took the second: the service watches
+> **non-recursively**, because the helper stores every file under its basename,
+> so only the top level of `dir` is ever read (`installWatch`, `service.js`).
+> Nothing else in the service needs 20.13, so the floor is `>= 20`. If a
+> recursive watch is ever reintroduced, move the floor back to 20.13.0 in the
+> same commit — in `package.json` and here.
 
 ---
 
@@ -39,8 +46,8 @@ Images (`.png .jpg .jpeg .gif .webp .avif .bmp .svg`) are picked up automaticall
 
 **`dir` is fenced.** The service resolves it through `ctx.fence(ctx.webChatDir ?
 path.dirname(ctx.webChatDir) : process.cwd(), dir)` — a path a pane wrote must
-never escape the project. A `dir` that fences to `null` is a hard error state
-(§3.3), never a silent fallback.
+never escape the project. A `dir` that fences to `null` is the `bad-dir` error
+state (§3), never a silent fallback.
 
 ### 1.2 The four files
 
@@ -167,11 +174,12 @@ committed graph node, so an unbounded hint would be copied forever.
 
 **v0.1.0 is stance B: artboard-fraction anchors, no capability injection, no
 web-chat core change.** The canvas's own comment layer never mounts, because we
-serve no `globalThis.claude` — that is the payload's designed fallback (§6).
+serve no `globalThis.claude` — that is the payload's designed fallback
+(FINDINGS §6).
 
 ### 4.1 What web-chat stores
 
-Unchanged shape (§7):
+Unchanged shape (FINDINGS §7):
 
 ```jsonc
 { "id": "c12", "seq": 12, "created_at": 0, "shared": true, "text": "…",
@@ -205,7 +213,7 @@ dca<fileHash12><fx4><fy4>:nth-of-type(1)
 
 It is also safe under an unmodified web-chat: the string is syntactically valid
 CSS, so `querySelectorAll` returns zero matches and the marker is skipped rather
-than throwing (§7).
+than throwing (FINDINGS §7).
 
 ### 4.3 Validation — both directions
 
@@ -222,8 +230,8 @@ so an anchor this contract calls valid may be dropped — accepted, because loos
 validator to match a permissive spec is the wrong direction.
 
 The web-chat server stores `anchor` **verbatim with zero validation**, and
-`describeAnchor` does not truncate `selector` (§7). An invalid anchor is dropped,
-not stored.
+`describeAnchor` does not truncate `selector` (FINDINGS §7). An invalid anchor
+is dropped, not stored.
 
 ### 4.4 `anchor.text` — the label
 
@@ -274,7 +282,7 @@ Pane scripts are compiled as `new Function('store','root','params','mountId', bo
 |---|---|---|
 | node preview / glance card | `location.pathname.startsWith('/preview/')` | Static placeholder. The preview CSP is `default-src 'none'` with no `frame-src` and `connect-src 'none'` — both the frame and the fetch are dead. |
 | frozen export | the payload fetch rejects | "This canvas exports as its own file — see `<title>.html`". Never an empty box. |
-| non-secure context | `!window.isSecureContext` | Warn **before** mounting the frame. The canvas hangs on a permanent spinner off a secure origin (§5). |
+| non-secure context | `!window.isSecureContext` | Warn **before** mounting the frame. The canvas hangs on a permanent spinner off a secure origin (FINDINGS §5). |
 | pin whose artboard is not in view | absent from the projection | Dock the marker to the pane corner with its label. Never drop it. |
 
 ### 5.3 The payload carrier must not be mountable

@@ -5,7 +5,7 @@
      one screen per state; it never carries canvas bytes itself.
 
      BYTE BUDGET: **at most 128 KB**, half the hard 256 KB tripwire ceiling
-     (CONTRACT §8.4). It is ~96 KB today: ~18 KB of style and markup, 13 KB that
+     (CONTRACT §8.4). It is ~104 KB today: ~18 KB of style and markup, 13 KB that
      is the verbatim inline of `scratch/anchor-lib.js` (a component installs
      exactly four files, so the pane cannot import it — CONTRACT §1.2/§5.1), and
      the rest this script. What actually matters is not the number but the rule
@@ -761,7 +761,7 @@ if (typeof module === 'object' && module !== null && module.exports) {
   let canvas = null;                 // dsn_canvas — the pane's whole world
   let files = null;                  // dsn_files
   const lastSeq = { dsn_canvas: 0, dsn_files: 0 };
-  let loadState = 'idle';            // idle|loading|ok|http|net|live-store|not-canvas|empty|noname
+  let loadState = 'idle';            // idle|loading|ok|http|net|live-store|not-canvas|empty|noname|badname
   let loadErr = '', loadedKey = null;
   let booted = null;                 // did artboards actually appear in the frame?
   let wrapNode = null, frame = null, ov = null, dockNode = null, armbar = null;

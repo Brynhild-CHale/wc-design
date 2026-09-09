@@ -92,7 +92,7 @@ breaks with it, and no one at Anthropic owes you anything about that.
 |---|---|
 | **Claude Code** | with the bundled `design` skill available, and run at least once so the payload exists on disk (see [First run](#first-run)). |
 | **claude-web-chat** | **`>= 0.7.0`.** Not 0.6.x — see below. |
-| **Node** | **`>= 20`.** The service uses `node:fs.watch` with `recursive`. |
+| **Node** | **`>= 20`.** The service watches `dir` with `node:fs.watch`, non-recursively. |
 | **A secure context** | Open the surface on `localhost`, `127.0.0.1`, `*.localhost`, or any `https://` origin. See below — this one bites. |
 
 **Why the 0.7.0 floor and not 0.6.0.** `use_component` only gained the `signals` (and `force`)
@@ -304,6 +304,8 @@ wc-design/
 ├─ LICENSE                     MIT, wrapper code only, with the non-affiliation notice
 ├─ upstream.lock.json          fingerprints of the payload this was verified against
 ├─ components/design-canvas/   component.html · meta.json · seed.js · service.js
+├─ dev-notes/                  maintainer notes — architecture, extending, web-chat platform
+├─ scratch/anchor-lib.js       the anchor grammar; source, inlined into the pane, under test
 ├─ test/                       the Uc anchor-port proof; skips when no payload is installed
 ├─ test-fixtures/canvas/       a small hand-authored canvas that must seed and --check clean
 └─ scripts/

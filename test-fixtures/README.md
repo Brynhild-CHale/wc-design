@@ -53,5 +53,6 @@ files byte-identical to the sources here.
 
 Re-run both commands above and read stderr before committing. Keep the fixture
 small (each file well under the 256 KB tripwire ceiling and the image under
-20 KB), keep it free of absolute home paths, usernames and emails (§9.6), and
-keep `Detail.dc.html` script-free — that absence is the thing under test.
+20 KB), keep it free of absolute home paths, usernames and emails
+(CONTRACT §9.6), and keep `Detail.dc.html` script-free — that absence is the
+thing under test.

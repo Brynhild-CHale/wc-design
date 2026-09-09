@@ -1,11 +1,27 @@
-# Reverse-engineering Claude Design — findings
+# Claude Design — the findings `wc-design` is built on
 
-Research notes for `wc-design`, a web-chat component pack that wraps Claude
-Design's canvas editor. **No implementation yet.** This file records what was
-established, how, and what it forces. Everything here was verified against a
-local install rather than inferred; where something is unverified it says so.
+> **This is the trimmed public record.** It documents what the shipped code
+> actually rests on: where Claude Code materialises the Claude Design assets, the
+> CLI of the seeding helper the service spawns, the shape of a seeded page, the
+> boot requirements of one, the anchor grammar the pane mints and validates, and
+> everything about **web-chat** itself.
+>
+> Analysis of Claude Design internals this pack does not touch was deliberately
+> left out — the publish/save call path, how a host capability is served and how
+> writability is decided, live-store dispatch mechanics. None of it is something
+> the code depends on, so none of it is here; it stays in a local, untracked
+> research archive and is not part of this repository.
+>
+> **Section numbers are load-bearing.** `CONTRACT.md`, `service.js` and
+> `component.html` cite this file by number. Where a section was removed its
+> number is kept as a short stub rather than reused, so every existing citation
+> still resolves.
 
-Established against: Claude Code **2.1.263**, `claude-web-chat` **0.7.5**, Node 24.
+Everything below was verified against a local install rather than inferred; where
+something is unverified it says so. Established against Claude Code **2.1.263**,
+`claude-web-chat` **0.7.5**, Node 24. Implemented by v0.1.0 in
+`components/design-canvas/`; `CONTRACT.md` is the normative interface, this is the
+evidence under it.
 
 ---
 
@@ -20,7 +36,7 @@ the bundled `design` skill runs in a session:
 └─ seed-canvas.mjs             40,699 B   seeding / extract / check helper
 ```
 
-| | sha256 | 
+| | sha256 |
 |---|---|
 | `payload.template.html` | `76a2b0a4e5d4efccc9b8c825ed70aa320179cbc95541755be2af50bfd6d36196` |
 | `seed-canvas.mjs` | `31a2a1528c7a30b624b7370cc542d8378a3643d97cc14ff3e6a4bce842878cd8` |
@@ -28,9 +44,9 @@ the bundled `design` skill runs in a session:
 Three things about that path that are easy to get wrong, and were:
 
 - **The temp root is not `$TMPDIR`.** It is `process.env.CLAUDE_CODE_TMPDIR || "/tmp"`
-  — a hardcoded literal. On macOS `/tmp` → `/private/tmp` through a symlink, which
-  is the only reason the observed path looks like `/private/tmp/...`. `$TMPDIR`
-  (`/var/folders/…`) is never consulted.
+  — a hardcoded literal. On macOS `/tmp` resolves through a symlink into
+  `/private/…`, which is the only reason an observed path looks the way it does.
+  `$TMPDIR` (`/var/folders/…`) is never consulted.
 - **The 32-hex segment is not a content hash.** It is `randomBytes(16).toString("hex")`,
   a fresh per-process nonce. It is unpredictable, differs every run, and sibling
   nonce directories accumulate. Never treat it as a stable key — enumerate and
@@ -38,17 +54,21 @@ Three things about that path that are easy to get wrong, and were:
 - **There is a `claude-<uid>` segment** between the temp root and `bundled-skills`.
 
 All four installed Claude Code versions (2.1.252 / 259 / 260 / 263) carry
-byte-identical design assets.
+byte-identical design assets, so the assets are stable across patch releases even
+though their path is not.
 
-`scripts/find-payload.mjs` implements this discovery and is verified working.
+`scripts/find-payload.mjs` implements this discovery and is verified working; the
+same logic is duplicated inline in `service.js`, because a component installs
+exactly four files and cannot import a helper (CONTRACT §6.2).
 
 ---
 
 ## 2. The helper is the reuse surface
 
-`seed-canvas.mjs` is 464 lines, zero dependencies, and heavily commented — it is
-by far the best documentation of the payload's contract. **Program against the
-helper, not the editor.**
+`seed-canvas.mjs` is 464 lines, zero dependencies, and heavily commented — it
+ships in the clear on every machine that has run `/design`, and it is by far the
+best documentation of the payload's contract. **Program against the helper, not
+the editor.**
 
 Three modes, dispatched in a fixed order that a caller cannot override:
 `--extract` → `--check` → seed (the fall-through default). Passing `--extract`
@@ -74,8 +94,8 @@ are last-wins.
 
 Purely textual, eight steps over `payload.template.html`: three head-scoped regex
 replacements (README comment, README meta, capabilities meta), a global literal
-`split/join` of `APPIFACT-TITLE-PLACEHOLDER`, then parse/mutate/re-serialize of
-the state block — set `title`, replace `content` with `{files}`, **`delete state.store`**
+`split/join` of the title placeholder, then parse/mutate/re-serialize of the
+state block — set `title`, replace `content` with `{files}`, **`delete state.store`**
 — with every `<` escaped, spliced back byte-exactly. A final invariant check
 (unchanged `<script` count, no surviving placeholder) aborts before any write.
 
@@ -115,74 +135,58 @@ DOC_RE  = new RegExp('(<script type="application/json" id="appifact-doc"' + DATA
 Exactly one optional server-added attribute is tolerated — a 16-char `data-id`
 that may not start with `-` and may not contain `--`. A 15- or 17-char id makes
 the page unrecognisable. The lazy match is safe only because the serialiser
-escapes every `<` inside the payload.
+escapes every `<` inside the payload. `service.js` reimplements this to find the
+state block of a page it seeded; the two must be kept in sync.
 
 ### Diagnostics
 
 Everything goes to **stderr** prefixed `design canvas: ` (fatal) or
 `design canvas: warning — `; only the one-line success summary goes to stdout.
 Exit codes are exactly 0 / 1. Seed-time problems are fatal; the same problems at
-`--check`/`--extract` time are advisory.
+`--check`/`--extract` time are advisory. This is why the `seed-failed` state
+carries the helper's stderr **verbatim** (CONTRACT §3) — it is written to be read
+by a person, and paraphrasing it loses the fix.
 
 ---
 
-## 3. The editor's host contract
+## 3. Serving no host object — the one fact the pack uses
 
-The page is an "appifact" and expects exactly one host global, `globalThis.claude`,
-with capabilities resolved two ways — direct property `claude.<name>`, or
-`await claude.use("<name>")`. Detection is pure duck-typing:
+*(The rest of the editor's host contract is not published; see the header note.
+This number is retained because later sections are cited by number.)*
 
-```js
-function DI(){ return globalThis.claude }
-function NI(){ return typeof DI()?.use == "function" }
-function NR(e){ return DI()?.[e] }
-```
+`wc-design` serves no `globalThis.claude` at all. What that produces is the only
+part of the host contract anything in this repository depends on:
 
-**There is no token, no origin assertion, no parent-frame gate, and no integrity
-check anywhere in the capability path.**
+**With no host object the page does not crash.** It renders the `appifact-doc`
+seed embedded in its own body and sits read-only — pan, zoom, export. There is no
+Save button to press and nothing on screen to extract. That is the payload's own
+designed fallback, and it is what CONTRACT §9.5 rests on.
 
-Capabilities declared in the head meta: `self`, `downloads`, `comments`, `room`,
-`db`, `assets`, `user`.
-
-Writability is decided by: `n0()` (either `claude.self.publish` is a function or
-`claude.use` is a function) **and** no sticky read-only flag in sessionStorage
-**and** (`user.canEdit() === true` **or** the `assets` capability being present).
-Note the quirk — `assets` presence alone grants write even when `canEdit()`
-returns false.
-
-**With no host globals the page does not crash.** It renders the embedded
-`appifact-doc` seed and sits read-only. The only hard boot throw is on the manual
-path if `#appifact-app` / `#appifact-style` were stripped.
+One operational corollary: the seeded document is served to the frame **verbatim**.
+The only hard boot throw on this path is a document whose `#appifact-app` /
+`#appifact-style` elements were stripped, so nothing may rewrite the seeded file
+between the helper and the `srcdoc`.
 
 ---
 
-## 4. Two save paths, chosen by DOM inspection
+## 4. Gate on seeded output, never the raw template
 
-Boot dispatches on the document, not on the host:
+A seeded canvas differs from the raw template in exactly the way that matters
+here: seeding **deletes `state.store`** (§2). The pristine template's own state
+block still carries `store:"db"`, so a check that passes against the template
+proves nothing about a page.
 
-```js
-if (getElementById("appifact-doc") === null) return { mode: "files" }
-return block.store === "db" ? { mode: "db", block } : { mode: "legacy", block }
-```
+The operational rule, and the whole of what the code does with it:
 
-- **`db` mode** — what the *pristine template* boots, because its own state block
-  begins `{"store":"db","title":"APPIFACT-TITLE-PLACEHOLDER",…}`. The design lives
-  in a Firestore-shaped live store reached via `claude.db`. `saveMode` is `"auto"`
-  — no Save button. Without a `db` capability it pins read-only with
-  *"Viewing the published snapshot. Live content isn't available in this view."*
-- **`legacy` / manual mode** — what a **seeded** canvas boots, because seeding
-  deletes `state.store`. The whole page re-serialises itself and calls
-  `claude.self.publish(htmlString)` — one argument, the complete new HTML
-  document, 16 MiB cap enforced client-side. This is the path with the Save
-  button and Cmd+S.
+> **Refuse a page whose `appifact-doc` block still carries `store:"db"`.** It will
+> boot read-only no matter what a host provides, and it is not one of ours. The
+> pane renders state `live-store` and stops before mounting the frame
+> (CONTRACT §5.4, §3).
 
-There is **no version/CAS token on the publish call**. The host performs the CAS
-and throws `{code:"conflict"}`; the page stashes to sessionStorage and reloads.
-(`baseVersion`/`occToken` in the bundle belong to a separate local-dev filesystem
-driver, not the artifact publish path.)
-
-> **Gate on seeded output, never the raw template.** A page whose `appifact-doc`
-> block still has `store:"db"` will boot read-only no matter what a host provides.
+Not published here: the anatomy of the publish/save call path, its conflict
+handling and its client-side stash. v0.1.0 serves no publish capability
+(CONTRACT §9.5) and never travels that path, so nothing in this repository
+depends on how it works.
 
 ---
 
@@ -202,6 +206,9 @@ page errors, zero failed subresource requests, canvas rendered.
   **`allow-same-origin` appears zero times in the payload.** That isolation cannot
   be weakened by a host, which is a useful safety property.
 
+This is why the right way to share a canvas is to hand over the seeded `.html`
+file: it opens from disk with no server and no network.
+
 ### It needs a SECURE CONTEXT, not "any local origin"
 
 This corrects an earlier assumption. Working: `file://`, `http://127.0.0.1`,
@@ -209,56 +216,56 @@ This corrects an earlier assumption. Working: `file://`, `http://127.0.0.1`,
 host over plain http — a LAN IP, a bare hostname, an mDNS `.local` name. In a
 non-secure context `crypto.randomUUID` is undefined, the unguarded artboard
 handshake throws, and the canvas hangs on a permanent spinner with the toolbar
-rendered. This must become an enforced, documented invariant, because the obvious
-next steps (bind `0.0.0.0` so a phone can view it; share over a LAN) all break it
-silently.
+rendered. This is an enforced, documented invariant, because the obvious next
+steps (bind `0.0.0.0` so a phone can view it; share over a LAN) all break it
+silently and it looks like a slow load rather than a failure. The pane checks
+`window.isSecureContext` and warns **before** the frame is ever created
+(CONTRACT §5.2).
 
 ---
 
-## 6. The comment subsystem — the central finding
+## 6. The comment layer, and the anchor grammar
 
-**The canvas has no pin UI of its own.** Its entire visible comment surface is
-two things: `data-testid="mega-comment-layer"` (an `absolute inset-0 z-[48]`
-crosshair overlay whose only child is a coral hover-highlight box) and
-`data-testid="mega-sel-comment"` (a toolbar button). It renders **no pins, no
-bubbles, no threads, no composer**. `controller.placed(map)` exists *precisely
-because the host is expected to draw the pins*.
+Three facts, and they are the ones v0.1.0 rests on.
 
-So there is no second pin system to shim over or suppress. The canvas is a
-geometry engine with no comment UI; web-chat is a comment UI with no canvas
-geometry.
+**The canvas draws no pins of its own.** Its entire visible comment surface is a
+full-bleed crosshair overlay (`data-testid="mega-comment-layer"`) plus one toolbar
+button (`data-testid="mega-sel-comment"`) — the two handles to check this against
+a canvas of your own. It renders no pins, no bubbles, no threads, no composer: a
+host is expected to draw them. So there is no second
+pin system to shim over or suppress: the canvas is a geometry engine with no
+comment UI, and web-chat is a comment UI with no canvas geometry.
 
-### It is capability-driven, not store-driven
+**The layer stays dormant when no capability is served.** Mounting the comment
+layer is gated on a host-served comments capability; absent, it early-returns
+before mounting anything, warns once to the console, and the canvas behaves as if
+the feature did not exist. That is the payload's own designed fallback, and it is
+what makes v0.1.0's stance possible: **suppression is absence, not removal.** The
+pack serves no host object (§3), so it gets a canvas with its comment layer
+switched off without patching a byte.
 
-```js
-async function Tie(e){
-  let n = globalThis.claude?.comments, r = n?.customAnchors;
-  if (typeof r !== "function") return console.warn("[design] comments capability not served; artboard comments stay off"), null;
-  …
-}
-```
-
-- **Not gated on hosting mode** (files / legacy / db). The React component mounts
-  unconditionally; the only gate is capability presence.
-- Absent capability → early return, layer never mounts. That is the payload's own
-  designed fallback, and it means *suppression is absence, not removal*.
-- **No postMessage host protocol exists.** All postMessage traffic in the payload
-  goes *downward* into artboard iframes. The sole host link is the JS capability
-  object. **This forces same-origin — cross-origin is structurally impossible, not
-  merely degraded.**
-
-### The canvas reads only two fields per thread
-
-`{ id, anchor }`. Text, author, replies, resolved state — all live host-side and
-are never seen by the canvas. It hands back `{ id: {x, y} }`.
+**The host link is a JavaScript object, and there is no postMessage protocol for
+it.** All postMessage traffic in the payload runs *downward*, into artboard
+preview frames. The consequence is hard and permanent: any capability injection
+**forces same-origin** — cross-origin is structurally impossible, not merely
+degraded. That is why the frame is mounted by writing `srcdoc` (CONTRACT §7), and
+why §9 exists.
 
 ### Anchor grammar
 
-A synthetic CSS-selector string, minted by `dE(spec)` and parsed by `fE(string)`:
+The pane mints and validates anchors in Claude Design's **own** grammar even
+though v0.1.0 serves no capability, because those exact strings hand straight to a
+capability-driven host later with zero migration (CONTRACT §4.2). An anchor is a
+synthetic CSS-selector string:
 
 ```
-QP = (kind, payload) => "dc" + kind + payload + ":nth-of-type(1)"
-Die = /^dc([eanc])([0-9a-z]*):nth-of-type\(([1-9][0-9]{0,3})\)$/
+dc<kind><payload>:nth-of-type(1)
+```
+
+parsed back by
+
+```
+/^dc([eanc])([0-9a-z]*):nth-of-type\(([1-9][0-9]{0,3})\)$/
 ```
 
 | kind | shape | durability |
@@ -268,18 +275,25 @@ Die = /^dc([eanc])([0-9a-z]*):nth-of-type\(([1-9][0-9]{0,3})\)$/
 | note | `dcn<idHash12>:nth-of-type(1)` | — |
 | canvas point | `dcp<pageHash12>:nth-of-type(1) > dcc<x8><y8>:nth-of-type(1)` | — |
 
-`fileHash` is a 12-hex hash of the artboard **file path**; `fx`/`fy` are fractions
-encoded as `round(clamp01(v) * 9999)` zero-padded to 4 digits.
+`fileHash12` is a 12-hex hash of the artboard **file path**; `fx`/`fy` are
+fractions encoded as `round(clamp01(v) * 9999)` zero-padded to 4 digits.
 
-### The `comments` store collection is inert
+v0.1.0 mints the **artboard** form only. `scratch/anchor-lib.js` is the
+implementation (inlined verbatim into the pane, since a component ships four
+files), and `test/uc-port.test.mjs` proves our hash agrees with the payload's own
+over a sample of paths — extracting the reference at test time from the *local*
+install, never a committed copy, and skipping cleanly when the payload is absent
+(CONTRACT §8.2).
 
-Separate feature, shared with other appifact editors, shape
-`comments/<id> {text, author, at, elementKey?, elementLabel?}`, validated and
-capped at 200. **Zero consumers in this build** — `addComment`, `removeComment`,
-`commentSync`, `pendingCommentIds`, `retryCommentPublish` are each 3 definitions
-in 3 runtime adapters with 0 call sites; `elementKey`/`elementLabel` appear only
-in the validator and the README. Writing it persists, validates, counts against
-the 2 MB live-sync budget, and **renders nothing**.
+The grammar is also safe under an **unmodified** web-chat: the string is
+syntactically valid CSS, so `querySelectorAll` returns zero matches rather than
+throwing, and the marker is skipped rather than breaking the pin layer (§7).
+
+**Not published:** the `customAnchors` controller contract — what a host hands
+the canvas, what the canvas hands back, and how comment mode is held on. v0.1.0
+serves no capability, so nothing here speaks that interface and nothing in this
+repository depends on it. `dev-notes/extending.md` §1.3 records the shape of the
+seam and says to read the interface itself off a local install.
 
 ---
 
@@ -378,67 +392,27 @@ that make it survivable:
 - **Never serve `claude.db` or `claude.use`**, so the payload boots read-only from
   its embedded seed and never fetches cross-user published content.
 - Validate any canvas-minted anchor before it becomes durable data (≤1024 chars,
-  ≤10 `" > "` segments, final segment matching `Die`) — the server validates
-  nothing and `describeAnchor` does not truncate `selector`.
+  ≤10 `" > "` segments, final segment matching the grammar of §6) — the server
+  validates nothing and `describeAnchor` does not truncate `selector`.
 - An `isolate` mode that sandboxes the frame to an opaque origin is the safe
   default for viewing anything not locally authored. It costs element-level pins.
 
+These are CONTRACT §9.2 and §9.3, and they are contractual rather than advisory
+precisely because the exposure above cannot be engineered away.
+
 ---
 
-## 10. Design stances and how they scored
+## 10. Design stances — not published
 
-Three stances were designed and judged on three lenses.
+*(Number retained so later citations resolve.)*
 
-| | feasibility | isolation | UX coherence |
-|---|---|---|---|
-| **A** canvas owns pin placement | 5 | **7** | 4 |
-| **B** web-chat owns pin placement | **8** | 5 | **7** |
-| **C** hybrid | 7 | 3 | 6 |
-
-**All three judges independently killed stance A's headline constraint.** A
-claimed comment mode "cannot be pinned on", and built a whole product compromise
-on it. In fact the setter for `d` (comment mode) has **exactly one call site** —
-inside the host-supplied `mode` handler — and `controller.exitMode()` is a
-*request the host may ignore*. So comment mode can be held on indefinitely, and a
-`pointer-events` gate on the overlay unlocks pins that stay glued while the canvas
-stays editable. That is C's insight and it is correct.
-
-Net: **B is what ships first** — it needs no capability injection, no core change,
-and nothing an upgrade can wipe. **C is the better end state** once its defects
-are fixed, because it is the only stance that gets element precision, `reveal()`,
-and live geometry during editing.
-
-### Defects found in the candidate designs (fix before building)
-
-- **B / Tier 2 is non-functional as sketched.** `onClickTier2` is a window-capture
-  listener that calls `stopPropagation()` — killing web-chat's own document-capture
-  handler — then dispatches a synthetic click that re-enters itself. Infinite
-  recursion, composer never opens. Needs `if (!e.isTrusted) return`, a re-entrancy
-  flag, and no `stopPropagation` on the replay. Until then: artboard-fraction
-  anchors only.
-- **B: an armed overlay makes the canvas unusable** — `pointerEvents:'auto'` means
-  no pan, no zoom, no selection while pin mode is on. Never mentioned by B.
-- **C: top-level `await` in the pane script.** SyntaxError under `new Function`;
-  the bridge silently never exists.
-- **C: `dc_anchors` in the store leaks private pin locations to Claude** via
-  `get_store`. Fix by hex-encoding the canvas anchor into the proxy's own class
-  list so it rides inside `anchor.selector` and inherits the pin's own
-  shared/private filtering.
-- **A: `service.js` export shape is wrong.** The runner tests
-  `typeof svc.start === 'function'`; the sketch exports a bare async function, so
-  the service silently never starts. Correct shape is
-  `module.exports = { name, async start(ctx), async stop() }`.
-- **A: an `access-control-allow-origin: '*'` loopback server** re-introduces the
-  exact regression `lib/core/cors.js` documents having removed — any page the user
-  visits could scan loopback and read their design content. Use the
-  `/api/components/:name` route instead.
-- **A: the 90-line patch to `public/app/comments.js` is a fork of the release
-  tarball**, not a pack. The next `claude-web-chat` upgrade discards it and every
-  canvas pin silently goes invisible-but-live.
-- **All: anchor drift is unhandled.** A fraction anchor survives an artboard
-  rewrite and then points *confidently* at whatever moved into 42%,77%. Record a
-  cheap fingerprint (artboard box dimensions + a hash of serialised content) at
-  pin time and mark the marker "may have moved".
+Three candidate designs were compared before v0.1.0, and the outcome is what
+CONTRACT §4 specifies — artboard-fraction anchors, no capability injection, no
+web-chat core change — with the element-precise tier deferred to v0.2. The
+comparison itself was internal process; the defects it turned up are recorded
+where they belong, as rules in `CONTRACT.md` (§4.5 anchor drift, §5.1 the
+`new Function` compile shape, §6.1 the service export shape, §7 the forbidden
+delivery alternatives).
 
 ---
 
@@ -463,60 +437,74 @@ and live geometry during editing.
   answer, not a fallback.
 - Provenance rides in `upstream.lock.json` as fingerprints only, and
   `scripts/check-no-vendored.mjs` fails CI if any tracked file matches a locked
-  hash, carries an upstream marker, or exceeds a 256 KB ceiling.
+  hash, carries an upstream marker, or exceeds a 256 KB ceiling. The rule is
+  mechanical because "don't `cp` that file into the repo while debugging" is
+  exactly the kind of rule care does not keep.
 
-### Scrub before anything goes public
+### No personal data, enforced the same way
 
-`wc-design` itself is clean (verified: no username, email, account name or
-absolute home path in any file).
-
-The sibling packs are not. **3 files, 14 occurrences**, all real absolute vault
-paths used as worked examples:
-
-| file | occurrences |
-|---|---|
-| `wc-learn/CONTRACT.md` | 6 |
-| `wc-obsidian/CONTRACT.md` | 5 |
-| `wc-obsidian/SKILL.md` | 3 |
-
-e.g. a `vault` param holding an absolute home-directory path. Harmless
-locally, a personal-data leak the moment any of those packs is pushed public.
-Replace with a placeholder path before publishing anything from this folder.
-(An earlier research pass reported "~10 files" and a compliance-project tree —
-that was wrong; the verified figure is the table above.)
+No absolute home path, username, email or account name appears in any tracked
+file, and that is a CI gate (`leak-scan`, alongside the tripwire) rather than a
+habit — CONTRACT §9.6. Examples use `/path/to/…` or `~`, and the materialisation
+path is written `<tmp>/claude-<uid>/…` because a real one names a user. The gate
+matters most for files added later, which is why it self-tests: the scanner proves
+its rules still catch a planted leak before it certifies the tree clean.
 
 ---
 
 ## 12. What exists on disk
 
-| file | state |
+v0.1.0 is feature-complete against `CONTRACT.md`. Floors: `claude-web-chat`
+**>= 0.7.0**, Node **>= 20** (the note at the top of `CONTRACT.md` records why
+the 20.13.0 floor an earlier draft required no longer applies — the watch is
+non-recursive by design).
+
+| path | what it is |
 |---|---|
-| `scripts/find-payload.mjs` | written, **verified working** — resolves the local payload, ranks candidates, reports drift |
-| `scripts/check-no-vendored.mjs` | written, degrades correctly outside a git repo |
-| `scripts/relock.mjs` | written, untested |
-| `upstream.lock.json` | generated from the local install |
-| `.gitignore` | written — blocks payload, helper, seeded canvases |
-| `LICENSE` | MIT for wrapper code, with an explicit non-affiliation notice |
-| components, `SKILL.md`, `web-chat-pack.json`, `README.md` | **not started** |
+| `components/design-canvas/component.html` | the pane — chrome, frame, pin overlay, one screen per state; held well under a self-imposed 128 KB budget (half the tripwire ceiling), and it never carries canvas bytes |
+| `components/design-canvas/service.js` | the host service — payload discovery (§1), seeding through the helper (§2), the runtime-written carrier, `fs.watch` + the `dsn_ctl` control loop; never writes under `dir` |
+| `components/design-canvas/seed.js` | browser-side spawn seed for the drawer and command palette; offers back a canvas this surface already seeded, and otherwise offers nothing |
+| `components/design-canvas/meta.json` | params schema; `name` must equal the directory |
+| `scratch/anchor-lib.js` | the anchor grammar of §6 — source, not scratch: inlined into the pane and the subject of the port proof |
+| `test/uc-port.test.mjs` | the hash-port proof against the local payload; skips with a clear message when it is absent |
+| `test-fixtures/canvas/` | a small hand-authored canvas (`Main.dc.html`, `Detail.dc.html`, `canvas.json`, one SVG) that must seed and `--check` clean |
+| `scripts/find-payload.mjs` | discovery; `--json`, `--verify` against the lock |
+| `scripts/check-no-vendored.mjs` | the tripwire (§11) |
+| `scripts/lint-pack.mjs` | drives web-chat's own pack validator against this directory without pushing |
+| `scripts/relock.mjs` | regenerate `upstream.lock.json` after a verified upgrade |
+| `upstream.lock.json` | fingerprints only — versions, sha256s, byte counts |
+| `.github/workflows/ci.yml` | three gates: tripwire, leak scan, tests on Node 20 and 22 — and it asserts the payload is *absent* on the runner, so the skip paths are really exercised |
+| `dev-notes/` | maintainer notes: `architecture.md` (how the four files fit together), `extending.md` (v0.2, forks, the traps), `web-chat-notes.md` (platform findings); `dev-notes/README.md` indexes them |
+| `web-chat-pack.json`, `SKILL.md`, `README.md`, `CONTRACT.md`, `LICENSE` | the pack manifest, the agent-facing guide, the human entry point, the normative interface, and MIT-for-the-wrapper with the non-affiliation notice |
 
 ---
 
-## 13. Open decisions
+## 13. What was decided
 
-1. **How edits persist.** File round-trip via the supported `--extract` → edit →
-   re-seed loop; or hand off to a real published Artifact for genuine WYSIWYG
-   Save; or a local `claude.self.publish` stand-in (technically ~20 lines, but the
-   design skill says in as many words *"never add a stand-in for it"*, and two
-   research agents were blocked by the safety classifier for pursuing exactly
-   that — not recommended for a public repo).
-2. **Comment tier.** Ship B (artboard-fraction, no capability injection, no core
-   change) first, or go straight to C (element-precise, needs the capability
-   object and a core patch that upgrades would discard).
-3. **Default isolation.** Sandboxed opaque-origin frame (safe, viewer-only,
-   whole-pane pins) versus same-origin (needed for any pin precision, but inside
-   the daemon trust boundary).
-4. **Pack conventions to confirm:** `requires."web-chat"` floor must be `>=0.7.0`,
-   not `>=0.6.0` — `use_component` only gained `signals`/`force` in 0.7.0, and a
-   pack declaring a signal at spawn time on 0.6.x silently loses its wake path.
-   `set_store` takes a `patch` wrapper. Components ship exactly four files, so two
-   services in one pack cannot share a helper module.
+The open questions this research left are closed, and each answer is now
+contractual.
+
+1. **How edits persist — one-way, files → canvas.** No `claude.self.publish`
+   stand-in, and none is coming: the pane serves no host object, so the editor
+   boots read-only (§3) and the `.dc.html` files stay the only source of truth.
+   The service never writes under `dir`, so nothing can travel back the other way
+   by construction. `--extract` is the helper's way back into files from a canvas
+   edited *somewhere else* and is run by the user, never by this pack. For real
+   WYSIWYG Save, hand off to a published Artifact via the bundled `design` skill.
+   (CONTRACT §9.5.)
+2. **Comment tier — artboard-fraction anchors, no capability injection, no
+   web-chat core change** (CONTRACT §4). Anchors are nonetheless minted in the
+   payload's own grammar (§6), so the element-precise tier is a v0.2 upgrade
+   rather than a migration. The costs are stated plainly in the README's
+   limitations rather than hidden.
+3. **Default isolation — same-origin `srcdoc`, with `isolate: true` available and
+   pin-free.** Same-origin is not a preference: the host link is a JS object and
+   there is no postMessage protocol, so nothing else can ever work (§6). What
+   makes it acceptable is §9's invariants, which is why they are contractual.
+4. **Pack conventions — confirmed and encoded.** `requires."web-chat"` is
+   `">=0.7.0"`, because `use_component` only gained `signals`/`force` in 0.7.0 and
+   a pack declaring a signal on 0.6.x installs happily and silently loses its wake
+   path. The MCP `set_store` takes a `patch` wrapper while `ctx.driver.setStore`
+   takes the patch directly. A component installs exactly four files, so payload
+   discovery is duplicated inline in `service.js` instead of imported —
+   deliberate, and flagged in a comment at both sites.
