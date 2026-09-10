@@ -39,10 +39,23 @@ rendering and pins.
 | `title` | string | **yes** | — | What the design is CALLED. Content-named. The helper refuses generic titles. |
 | `isolate` | boolean | no | `false` | Sandbox the canvas frame to an opaque origin. Safe for viewing anything not locally authored. **Disables pins** (§4.6). |
 | `watch` | boolean | no | `true` | Re-seed when files under `dir` change. |
+| `frame_w` | number | no | — | Frame width in px for an artboard whose own source declares no size. Clamped to 120–8000 (§6.3.8). |
+| `frame_h` | number | no | — | Frame height in px, same rule. |
+| `expand` | `"auto"` \| `"fit"` \| `"fill"` | no | `"auto"` | Per-artboard fit/fill in the synthesised manifest. `auto` decides per artboard from the same evidence that decided its size; `fit`/`fill` force that value on **every** artboard (§6.3.8). |
+| `wide_scan` | boolean | no | `false` | Permit the weakest derivation rung — the widest declared px width anywhere in the source. Off by default because it is a heuristic, not a declaration (§6.3.8). |
 | `routing` | `"none"` | no | `"none"` | Set `none`. The comment path has its own first-class wake; activity items would be noise. |
 
 `dir` must contain at least one `<Name>.dc.html`. `canvas.json` is optional.
 Images (`.png .jpg .jpeg .gif .webp .avif .bmp .svg`) are picked up automatically.
+
+**The four frame params never override a value the user set.** They feed the
+frame the service *derives* for an artboard (§6.3.8): the whole manifest when
+`dir` has no `canvas.json`, and otherwise only the keys the user's own manifest
+leaves out. A `w` they wrote — including a wrong one — is passed through
+untouched. They are part of the trust fingerprint (§6.5), like `dir`, `title`,
+`isolate` and `watch`, so setting or changing one re-asks
+`claude-web-chat trust design-canvas`. Only `routing` is exempt, being read by
+the shell rather than by the service.
 
 **`dir` is fenced.** The service resolves it through `ctx.fence(ctx.webChatDir ?
 path.dirname(ctx.webChatDir) : process.cwd(), dir)` — a path a pane wrote must
@@ -76,7 +89,14 @@ The pane's whole world. Always written, in every state, including failure.
   "payload_component": "design-canvas-payload-a1b2c3d4",  // fetch GET /api/components/<this>
   "title": "Spring Menu Poster",
   "artboards": [
-    { "file": "Main.dc.html", "x": 0, "y": 0, "w": 880, "h": 560 }
+    { "file": "Main.dc.html", "x": 0, "y": 0, "w": 880, "h": 560,
+      "w_source": "canvas.json", "h_source": "canvas.json", "expand": "fit",
+      "widest_px": null, "can_scroll": null }
+  ],
+  "layout": "user",              // where that layout came from — see below
+  "frames": [
+    { "file": "Main.dc.html", "w": 880, "h": 560, "source": "canvas.json",
+      "expand": "fit", "widest_px": null, "can_scroll": null }
   ],
   "seeded_at": 1789000000000,
   "bytes": 2477094,
@@ -97,10 +117,83 @@ The pane's whole world. Always written, in every state, including failure.
   title; the two slug functions agree in the ordinary case but diverge on NFKD input,
   on titles over 60 chars, and whenever the service appends a hash to dodge the
   helper's generic-name list.
-- `warnings` (string[], may be empty) — non-fatal helper diagnostics worth showing.
-- `artboards` comes from `canvas.json` when present, else one entry per
-  `.dc.html` with `x`/`y`/`w`/`h` null. The pane uses it for pin labels and the
-  artboard index; it must tolerate nulls.
+- `warnings` (string[], may be empty) — non-fatal diagnostics worth showing: the
+  helper's own stderr warnings, and service-derived notes of the same kind (that
+  the frame sizes were synthesised, that a synthesised manifest was withdrawn —
+  §6.3.8). Both are prose for a person; neither is machine-read by the pane.
+- `save_endpoint` — `{ url, token }`, or `null`. The loopback save listener (§6.6).
+  `url` is `http://127.0.0.1:<ephemeral>/save/<64 hex>`. **`null` means the listener
+  could not be opened, and the pane MUST NOT install the host object** — that is
+  v0.1.0's read-only canvas, a correct degraded state rather than a failure.
+  Written in EVERY state, including failure states, so the pane never has to guess.
+- `last_save` — the outcome of the most recent Save, or `null` if none has happened
+  in this service's lifetime:
+
+  ```jsonc
+  { "seq": 3, "at": 1789000000000, "ok": true,
+    "written": ["Main.dc.html"], "created": [], "unchanged": ["canvas.json"],
+    "orphaned": [],                   // §6.4.5 — removed in the editor, left on disk
+    "backup_dir": "/…/backups/…",     // null when nothing was replaced
+    "state_bytes": 21057, "warnings": [], "error": null, "hint": null,
+    "reseed_seq": 4 }                 // the deliberate post-save re-seed (§6.7)
+  ```
+
+  The pane knows the post-save re-seed has landed when
+  `dsn_canvas.seq === dsn_canvas.last_save.reseed_seq`.
+- `artboards` describes the layout the canvas actually loaded: the entries of the
+  `canvas.json` that was seeded — the user's own, that file with omitted keys
+  filled in, or one the service synthesised (§6.3.8) — plus one entry per
+  `.dc.html` that manifest does not list, mirroring the editor's own auto-append.
+  The pane uses it for pin labels and the artboard index; **it must still tolerate
+  nulls** on every field but `file`, because a user's manifest may list some boards
+  and not others, or omit geometry on the ones it lists.
+  Each entry is `{ file, x, y, w, h, w_source, h_source, expand, widest_px,
+  can_scroll }` — `x`/`y`/`w`/`h` are numbers or null, the next three are the
+  provenance §6.3.8 defines, and the last two are the same evidence fields
+  `frames[]` carries below.
+- `layout` (string or null) — **where that layout came from**, so the pane can
+  explain itself instead of presenting a derived frame as a choice the user made:
+
+  | `layout` | meaning |
+  |---|---|
+  | `"user"` | `dir`'s own `canvas.json`, passed to the helper exactly as written |
+  | `"user-filled"` | their `canvas.json` with keys they **omitted** filled in (§6.3.8) |
+  | `"synthesised"` | no `canvas.json` on disk; the service generated the whole manifest |
+  | `"none"` | no manifest at all — every artboard gets the editor's 800 x 600 default |
+  | `null` | no seed has happened yet (`seeding`, or a failure state) |
+
+- `frames` (array, may be empty) — one entry per artboard the pane can show,
+  carrying the frame the editor will use and where that number came from. Empty
+  when no artboards are known (`bad-dir`, `no-payload`).
+  - `w`/`h` — the px the editor frames the artboard at, **already clamped to
+    120–8000**, so what the pane displays is what the canvas uses. `null` when no
+    manifest sizes this artboard, which means the editor's own 800 x 600.
+  - `source` — `"canvas.json"` (the user's own manifest said so), or one of the
+    ladder rungs of §6.3.8, best first: `"$preview"`, `"root-style"`, `"param"`,
+    `"wide-scan"`, `"default"`. **`null` means nothing sized it** — the manifest
+    was passed verbatim and carries no `w` for this artboard, or there is no
+    manifest — so the editor frames it at 800 x 600. When `w` and `h` came from
+    different rungs, `source` names the rung that produced **`w`**: width is what
+    the ladder ranks on and height follows from it. `artboards[]` carries both
+    halves as `w_source` / `h_source` for a pane that wants to show them apart.
+  - `expand` — the **effective** value, `"fit"` or `"fill"`, never `"auto"`; `null`
+    when nothing sized the artboard. It is reported even when the manifest omits
+    it, because `fit` is written by omission.
+  - `widest_px` (number or null) — the widest px width declared anywhere in the
+    artboard's source: the value rung B2 *would* have used. Reported **even when
+    `wide_scan` is off**, so a pane can offer it ("this design declares 1288px —
+    remount with `wide_scan`") instead of leaving the user to guess. `null` when
+    the source was never scanned (an entry from the user's own manifest) or
+    declares no px width.
+  - `can_scroll` (boolean or null) — whether the artboard document has a scroller
+    of its own (a `$preview`, an `overflow:auto|scroll` container, or its own
+    canvas surface). This is what makes `fill` survivable rather than clipping,
+    and it is why a wheel over an artboard without one chains out to the surface
+    page (§6.3.8). `null` when the source was never scanned.
+  - The pane MUST surface `source` next to the size. A frame that is a guess has
+    to look like a guess; a design framed wrong looks broken, and the whole point
+    of the ladder is that the user can tell which rung they landed on and reach
+    for `frame_w`/`frame_h` or a real `canvas.json` when it is the wrong one.
 
 ### 2.2 `dsn_files` — service → pane
 
@@ -340,6 +433,11 @@ throw still publishes a named `seed-failed` — a pane stuck on `seeding` with
    - Never pass a flag in final argv position — a trailing flag reads as absent.
    - `--out` must not be a generic name (`design.html`, `index.html`, `main.html`,
      `page.html`, `canvas.html`, `output.html`). Derive a slug from `title`.
+   - `--canvas` names the user's own `canvas.json`, or a manifest the service
+     writes **into the build directory** — synthesised when `dir` has none, or
+     their file with the keys they omitted filled in — so the artboards are framed
+     at their real size instead of the editor's 800 x 600 default. See §6.3.8;
+     `dsn_canvas.layout` reports which of those actually seeded.
    - Non-zero exit → state `seed-failed` with stderr verbatim.
 4. Write the seeded file as `<webChatDir>/components/<payload_component>/component.html`
    plus a `meta.json` per §5.3. The registry does a fresh `readdirSync` per call,
@@ -349,11 +447,183 @@ throw still publishes a named `seed-failed` — a pane stuck on `seeding` with
    debounce **250 ms**; re-seed; bump `seq`.
 7. Watch `dsn_ctl` over SSE for `reseed` / `rescan`.
 
-### 6.4 It never writes to `dir`
+#### 6.3.8 `canvas.json` synthesis — the frame-size ladder
 
-The working files are the user's. The service reads them and writes only to its
-build directory and the carrier component. Any code path that creates, modifies
-or deletes a file under `dir` is a bug, not a tradeoff.
+> Numbered **8** because §6.3.1–§6.3.7 are the steps above and are cited by
+> number from `service.js`. This is the detail behind step 3, not a ninth step.
+
+**Why this exists.** With no `canvas.json` the editor frames **every** artboard at
+its own default — **800 x 600 px**, then clamped to **120–8000**, silently. The
+helper never warns about it either: its numeric check only reports `x`/`y`/`w`/`h`
+that are *present and non-numeric*, so an omitted `w`/`h` passes `--check` clean
+and arrives as 800 x 600 with nothing said. A 1288-wide design in an 800 x 600
+frame is the bug this section exists to prevent — in the canvas view it is drawn
+small (the default opening view is zoomed out as well), and content past the frame
+edge is unreachable, because a seeded artboard document is pinned to its frame and
+the canvas provides no scroll container.
+
+**Two mechanism facts that constrain the fix.** Both verified against the payload;
+neither is inferred.
+
+- `expand` is read **only** while an artboard is focused/fullscreen. The
+  un-focused canvas view always frames an artboard at its `w` x `h`.
+  **No value of `expand` can correct a wrong frame — only `w`/`h` can.**
+- `fit` (the default) keeps the frame at `w` x `h` and scales the *view* down to
+  fit, **never up**. `fill` resizes the *frame* to the surface box at scale 1 — so
+  a design that cannot reflow or scroll is **clipped**, permanently, with no way
+  to reach the rest. Correct frames make `fit` right; they do not make `fill` right.
+
+**When it happens.** Whenever at least one `.dc.html` was found, in one of two
+shapes, reported as `dsn_canvas.layout`:
+
+- **`"synthesised"`** — `dsn_files.has_canvas_json` is `false`. The service builds
+  the whole manifest, listing every artboard.
+- **`"user-filled"`** — `dir` has a `canvas.json` and it leaves keys out. The
+  service fills **only** keys that are `undefined`, and only on entries naming an
+  artboard that is present.
+
+Otherwise nothing is written and `layout` reports the status quo: `"user"` (their
+manifest, passed as written, because it has no gaps or the service must not touch
+it) or `"none"` (no manifest at all — every frame is the editor's 800 x 600).
+
+**An explicit `canvas.json` always wins.** Filling a gap is a *repair*, never a
+rewrite. Precisely:
+
+- A key the user wrote is passed through untouched — **including a wrong one**, so
+  the helper's own refusal still names the value they wrote.
+- `x`/`y` are filled only alongside a `w`/`h` the service filled, and are placed
+  clear of every box the user positioned (the editor's own append origin: to the
+  right of the rightmost frame, 80 px on, at the topmost `y`). A filled entry
+  never lands on top of one they placed.
+- `expand` is filled only when the size was the service's to derive — an entry
+  whose `w` **they** set is a box they chose, and `fit` shows all of it — or when
+  the `expand` param explicitly asks for `fill` everywhere.
+- Artboards their manifest does not list are **not added**. Adding entries the
+  user did not write is the rewrite half; those boards keep the loader's own
+  behaviour (appended at 800 x 600) and their `frames[].source` is `null`.
+- The user's manifest is filled **only if it already parses, is the right shape,
+  and passes the mirror of the helper's own validation** below. Anything else is
+  handed to the helper untouched, so the fatal `--canvas <path>: …` names *their*
+  file and the rule it broke — that stderr is the `seed-failed` hint (§3), and it
+  has to point at a file they can open.
+
+**Where the file goes** — synthesised or filled, it is the same path:
+`path.join(buildDir, 'canvas.json')`, written through `assertWritable`, where
+`buildDir` is `<webChatDir>/.wc-design-build/<carrier>`.
+**Never under `dir`** — §6.4 is unconditional and this is not an exception to it.
+`payload.template.html` and `seed-canvas.mjs` are used 1:1 and are never modified.
+
+**The ladder.** Per artboard, best signal first. All of it is **bounded string
+parsing of untrusted content** (§9.3): the design is never executed, the source
+scan is capped at 512 KB, a `data-props` attribute at 64 KB, and every global
+regex has a bounded iteration count.
+
+| rung | `source` | signal | how it is read |
+|---|---|---|---|
+| A | `"$preview"` | `$preview: {width, height}` inside the artboard's `data-props` | The format's own size hint, and the strongest one: an artboard carrying it is declaring an intrinsic size. Parse the attribute, un-escape it, `JSON.parse`, and **validate the numbers yourself** (finite and > 0) — the runtime accepts any object there. |
+| B | `"root-style"` | an explicit px box in the `style` of the artboard's root element | The first element inside `<x-dc>` that is not `<helmet>`. `width` › `max-width` › `min-width`; `height` › `min-height` › `max-height`. **`px` only.** |
+| C | `"param"` | `frame_w` / `frame_h` | Exact by definition, but canvas-wide, so it ranks *below* A and B: a per-artboard declaration in the file beats a param that applies to all of them. To override a declaring artboard, change the artboard or write a `canvas.json`. |
+| B2 | `"wide-scan"` | the widest `width:`/`max-width:` px value anywhere in the source, 320–8000 | Weak: a heuristic, not a declaration. **Only used when `wide_scan` is true**, and a frame that rests on it reports `source: "wide-scan"`, so it can never pass for a declaration. |
+| D | `"default"` | the documented fallback | **1440** wide. Height, whenever it is not otherwise known, is `max(1024, round(w × 0.75))`. |
+
+**Refuse, never coerce.** A candidate value containing `{{` or `}}` is a template
+hole, not a number, and is rejected outright — the helper warns about holes in
+style attributes for exactly this reason, and a coerced `NaN` would land straight
+back on 800.
+
+**The height bias is deliberate, not taste.** An over-tall frame costs blank
+canvas; an under-tall frame destroys content, because the document is pinned to
+its frame and nothing inside can reach the rest. `fit` never scales up, so
+over-tall is cheap.
+
+**Rules a manifest the service writes must satisfy.** Each one is a failure mode
+of the loader or the helper, not a style preference. Rules 1 and 5 apply to a
+**`"synthesised"`** manifest only — a `"user-filled"` one adds no entry and no
+top-level key the user did not write.
+
+1. **List every `.dc.html`.** An unlisted artboard is appended by the editor at
+   the 800 x 600 default with an 80 px gap — a partial manifest leaves the bug
+   in place for exactly the boards it omits.
+2. **Always emit `x` and `y` alongside `w`/`h`.** The helper's overlap check only
+   scans entries where all four are numeric, so `w`/`h` without `x`/`y` stacks
+   every artboard at the origin and says nothing. Lay them out left to right with
+   an **80 px** gap, mirroring the editor's own auto-append.
+3. **Clamp `w`/`h` to 120–8000 before writing**, so the stored value and the
+   editor's value agree.
+4. **Emit only the keys an artboard entry may carry** — `file`, `x`, `y`, `w`,
+   `h`, and optionally `title`, `expand`, `print`, `page`, `is_interactive`. A
+   stray key at any level is **fatal** at seed time. Omit `expand` when it would
+   be `"fit"`: the default loads as exactly the default it names, so writing it
+   is legal but noise.
+5. **Single-artboard canvases get `launch: {view: "focused", file: <that board>}`.**
+   It opens on the design at fit-to-pane instead of the zoomed-out canvas view,
+   which is most of the felt "the page is shrunk". `file` must be a listed
+   artboard and a focused launch must carry no `page`. **Multi-artboard canvases
+   leave `launch` absent** — choosing one board's view for the user is not ours to
+   do.
+6. **A manifest costs one of the editor's 200 file entries**, and the helper
+   refuses a 201st. When the artboards and images already fill the budget, add no
+   manifest, say so in `warnings`, and let the frames stay at the default.
+7. **A generated manifest must never turn a working canvas into `seed-failed`.**
+   Every `canvas.json` problem is fatal at seed time, so a manifest the helper
+   refuses would break a canvas over a file the user never wrote. Two defences,
+   both required:
+   - **Self-check first** against a mirror of the helper's fatal `canvas.json`
+     rules — closed key sets, every listed file present and listed once, numeric
+     `x`/`y`/`w`/`h`, the `expand`/`print` vocabularies, `launch` shape, no
+     overlap. On failure, do not pass it at all.
+   - **Then fall back.** Seeding is an ordered list of attempts: the manifest the
+     service wants, then the *status quo ante* — the user's own file, or no
+     `--canvas` at all. If the helper refuses ours, re-run with the fallback and
+     record a `warnings` note saying so. `layout` then reports what actually
+     seeded, not what was attempted.
+
+**`expand`, resolved per artboard.** With `expand: "auto"`, from the same evidence
+that decided the size:
+
+| evidence | `expand` |
+|---|---|
+| any rung produced a width — `$preview`, a fixed-px root box, `frame_w`, or the wide scan | `"fit"` — the frame is a definite box, and `fit` shows all of it |
+| no size signal, **and** the source has its own `overflow:auto\|scroll` container or declares its own canvas surface | `"fill"` — genuinely fluid and scrollable, which is what `fill` is for |
+| no size signal and no scroller | `"fit"` — `fill` would resize the frame to the pane and clip a document that cannot scroll |
+
+`expand: "fit"` or `"fill"` forces that value on every artboard and skips the
+table. `fill` is not the safe blanket default: it is right only for a fluid-width
+root that can scroll, and wrong — irreversibly, by clipping — for anything else.
+The editor's own Fit/Fill toggle still flips it live either way, so the user is
+never locked in.
+
+**The frame is baked at seed time** and does not track the pane's size. Resizing
+the browser re-lays-out the *view*, not the frames; only a re-seed changes them.
+
+### 6.4 It writes to `dir` ONLY through the save path
+
+> **Reversed in v0.2, deliberately.** This section used to read "It never writes
+> to `dir`", and that was the right rule while the pipeline was one-way. Edit
+> mode (§9.5) makes Save write the user's own edits back to their own files, so
+> the rule is now a narrow licence rather than a prohibition. Nothing else about
+> the service may write there.
+
+The working files are the user's. The ONLY code path permitted to modify them is
+`saveBack()` (§6.6). Seeding, watching, the carrier and every diagnostic write to
+the build directory or the carrier component and never to `dir`.
+
+`saveBack()` must satisfy all of:
+
+1. **Extract first, write second.** Nothing under `dir` is touched until
+   `--extract` has exited 0 AND returned at least one `<Name>.dc.html`. An empty
+   or failed extract aborts with the user's files bit-identical.
+2. **Back up every file it replaces**, under the build tree, before the first
+   byte is written. A bad save must be recoverable.
+3. **Write-then-rename**, per file, so a crash cannot leave a half-written file.
+4. **Roll back the whole batch** if any file fails mid-way.
+5. **Never delete.** An artboard removed inside the editor simply will not come
+   back from the extract; report it as orphaned and leave the file alone.
+6. **Compare `canvas.json` by meaning, not bytes.** It round-trips through the
+   helper's own `JSON.stringify`, so byte-comparing would rewrite the user's
+   hand-formatted manifest on every save.
+7. **Suppress the watcher** for its own writes, or Save triggers a re-seed that
+   fights the editor (§6.7).
 
 ### 6.5 Trust
 
@@ -362,6 +632,41 @@ A service is host code and does not start until the user runs
 `service.js` contents, params) — so editing the service or changing params asks
 again. `SKILL.md` must tell Claude to say that command in chat when mounting the
 pane; the pane cannot grant it.
+
+### 6.6 The save transport
+
+The edited document is ~2.5 MB, but its state block — the user's actual content —
+is under 1% of that (measured: 19,777 bytes of a 2,495,380-byte page), and
+`--extract` accepts a minimal page carrying only that block. **Only the state
+block travels.**
+
+It must NOT travel through the store: `POST /api/store` puts the whole patch into
+the event ring, the WS frame and every SSE subscriber, and `graph.js` snapshots
+the store into every committed node. A canvas with images would push six figures
+into every node forever.
+
+So the service opens a **loopback save listener**:
+
+- bound `127.0.0.1` on an ephemeral port, POST only, body capped
+- a per-spawn random path token
+- `Access-Control-Allow-Origin` echoing the request's Origin **only** when it is a
+  `localhost` / `127.0.0.1` origin. Never `*` — a wildcard here would re-introduce
+  the regression `lib/core/cors.js` documents having removed.
+- published to the pane as `dsn_canvas.save_endpoint = { url, token }`
+
+**The frame never learns the endpoint.** The shim posts to the PANE with
+`parent.postMessage`; the pane validates `event.source === frame.contentWindow`
+and forwards. The pane is the only thing that talks to the listener.
+
+### 6.7 Watcher suppression
+
+The service watches `dir` and re-seeds on change, and Save now writes to `dir`.
+Without care that is a loop: Save → write → watcher → re-seed → pane reload,
+fighting the editor and discarding in-flight work.
+
+`saveBack()` must record the paths and mtimes it wrote and have the watcher ignore
+exactly those for a bounded window, then re-seed **once**, deliberately, so the
+carrier matches what is now on disk.
 
 ---
 
@@ -446,24 +751,44 @@ untrusted input (§4.4).
 - Exactly four files per component install.
 - `components` in the manifest is an explicit allowlist.
 
-### 9.5 No `claude.self.publish` stand-in, and the pipeline is ONE-WAY
-v0.1.0 does not emulate the artifact-publish capability. Because the pane serves
-no `globalThis.claude` at all, **the editor boots read-only** — pan, zoom, look.
-There is no Save button to press and nothing on screen to extract.
+### 9.5 Edit mode: one host member, and Save is REAL
 
-So the data flow is one-way: **`.dc.html` files → canvas.** The files on disk are
-the only source of truth. You change a design by editing them and letting the
-service re-seed. The service never writes under `dir` (§6.4), so nothing can
-travel back the other way, by construction.
+> **Reversed in v0.2 by the repository owner**, who runs this on their own
+> hardware against their own files. v0.1.0 served no host object at all, so the
+> editor booted read-only. That was a deliberate choice and it is now a different
+> deliberate choice. The reasoning is recorded here rather than left implicit.
 
-`--extract` is NOT part of this loop. It is the helper's way back into files from
-a canvas that was edited *somewhere else* — a published Artifact someone saved —
-and it is run by the user, never by this pack. For real WYSIWYG Save, hand off to
-a published Artifact via the bundled `design` skill.
+The pane defines exactly ONE host member before the payload's scripts run:
 
-> Earlier drafts of this document, the README and the manifest described an
-> "edit round trip" through `--extract`. That was wrong and is corrected here;
-> if you find that phrasing anywhere else, this section wins.
+```js
+globalThis.claude = { self: { publish: async (html) => { /* … */ } } };
+```
+
+- **One member only.** `use()` is deliberately NOT defined: it is not required,
+  and defining it switches on presence probing a single-user local host has no
+  business doing. Nothing remote-only is ever served (§9.2 still holds — no `db`,
+  no `room`, no published-Artifact URLs).
+- **Injection is a splice after `<head>`**, not a rewrite. The payload's `<head>`
+  opens at byte 33 and its first `<script>` is ~490 KB in, so one `<script>`
+  spliced at the head boundary runs before anything and touches nothing else.
+  Verified: script-tag count goes 22 → 23 and the state block is untouched.
+- **Save is real.** The handover is written back to the user's own `.dc.html`
+  files through the helper's own `--extract` (§6.4, §6.6). A Save that did not
+  durably persist would be the genuinely harmful design and is not what this is.
+
+#### Error discipline — the part that can brick a tab
+
+The host's rejection value decides what the editor tells the user, and one class
+of value is unrecoverable:
+
+| reject with | editor behaviour |
+|---|---|
+| a plain `Error` | normalises to a recoverable failure: one automatic retry, then *"Saving failed (…). Your changes are kept — try again."* The document stays editable and dirty. **This is the only failure we may emit.** |
+| `not_writer`, `not_declared`, `capability_disabled`, `capability_removed` | writes a **sticky `sessionStorage` read-only pin that cannot be cleared from the UI**. In a `srcdoc` frame that key is tab-global, so one of these bricks editing for the whole tab. **Never construct these values.** |
+
+`publish` takes one argument — the complete document — is awaited, and its return
+value is discarded. There is no version token on the call; a single-user local
+host has no compare-and-set to perform.
 
 ### 9.6 No personal data
 No absolute home paths, usernames, emails or account names in any tracked file.

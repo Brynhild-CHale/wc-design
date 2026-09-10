@@ -2,17 +2,29 @@
      A live Claude Design canvas, seeded on disk by this component's service and
      delivered to the browser through GET /api/components/<payload_component>
      (CONTRACT §7). This file renders the chrome, the frame, the pin overlay and
-     one screen per state; it never carries canvas bytes itself.
+     one screen per state; it never carries canvas bytes itself. It also installs
+     the ONE host member that turns the canvas from a viewer into an editor, and
+     carries the editor's Save back to the service (CONTRACT §6.6, §9.5) — see
+     "the host object" and "EDIT MODE" below.
 
-     BYTE BUDGET: **at most 128 KB**, half the hard 256 KB tripwire ceiling
-     (CONTRACT §8.4). It is ~104 KB today: ~18 KB of style and markup, 13 KB that
-     is the verbatim inline of `scratch/anchor-lib.js` (a component installs
-     exactly four files, so the pane cannot import it — CONTRACT §1.2/§5.1), and
-     the rest this script. What actually matters is not the number but the rule
-     behind it: the 2.4 MB canvas is NOT in this file and must never be. Pane
-     `html` is snapshotted into every committed graph node, so a payload here
-     would be copied into every node on disk, forever (FINDINGS §8). It arrives
-     at runtime, over fetch, and goes straight into an iframe's `srcdoc`.
+     BYTE BUDGET: **at most 144 KB**, well inside the hard 256 KB tripwire
+     ceiling (CONTRACT §8.4). It is ~138 KB today — ~19 KB of
+     style and markup, 13 KB that is the verbatim inline of
+     `scratch/anchor-lib.js` (a component installs exactly four files, so the
+     pane cannot import it — CONTRACT §1.2/§5.1), and the rest this script.
+
+     That budget used to read 128 KB, exactly half the ceiling, and edit mode
+     (the host object, the save transport, the save-state chrome — CONTRACT
+     §6.6/§9.5) does not fit inside it. That is measured, not assumed: the
+     feature is 21.9 KB, of which 6.7 KB is comment, so deleting every word of
+     explanation in it would still land at ~131 KB. The number moved
+     deliberately; the rule behind it did not, and the rule is what matters —
+     the 2.4 MB canvas is NOT in this file and must never be. Pane `html` is
+     snapshotted into every committed graph node, so a payload here would be
+     copied into every node on disk, forever (FINDINGS §8). It arrives at
+     runtime, over fetch, and goes straight into an iframe's `srcdoc`.
+     (The table in FINDINGS §12 still describes this file as held under 128 KB;
+     that line belongs to that document's owner, not to this one.)
 
      Two failure modes kill a pane silently; both are avoided here:
        - the script body is compiled as `new Function('store','root','params','mountId', body)`
@@ -79,9 +91,11 @@
            background: var(--wc-panel-bg, #f7f7f8); }
   .dc-bn.warn { border-left-color: var(--dc-alert); }
   .dc-bn.bad  { border-left-color: var(--dc-bad); }
+  .dc-bn.ok   { border-left-color: var(--wc-green, #3f8f5f); }
   .dc-bn .dc-ic { margin-top: 2px; flex: none; color: var(--wc-muted, #77777f); }
   .dc-bn.warn .dc-ic { color: var(--dc-alert); }
   .dc-bn.bad .dc-ic  { color: var(--dc-bad); }
+  .dc-bn.ok .dc-ic   { color: var(--wc-green, #3f8f5f); }
   .dc-bn code, .dc-mono { font-family: var(--wc-mono, ui-monospace, Menlo, monospace); font-size: 11.5px; }
   .dc-bn code { background: var(--wc-bg, #fff); border: 1px solid var(--wc-border-light, #efeff2);
                 border-radius: 4px; padding: 0 4px; overflow-wrap: anywhere; }
@@ -114,14 +128,62 @@
   .dc-flist .n { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .dc-flist .v { color: var(--wc-muted, #77777f); font-variant-numeric: tabular-nums; text-align: right; }
 
+  /* file · size · where the size came from — the framing table (CONTRACT §2.1
+     `frames`). Three columns so the derivation reads as a column, not a footnote. */
+  .dc-frames { display: grid; grid-template-columns: minmax(0,auto) auto minmax(0,1fr);
+               gap: 1px 10px; margin: 5px 0 3px; font-size: 11.5px; align-items: baseline; }
+  .dc-frames .f { font-family: var(--wc-mono, ui-monospace, Menlo, monospace);
+                  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .dc-frames .d { font-variant-numeric: tabular-nums; white-space: nowrap; font-weight: 600; }
+  .dc-frames .s { color: var(--wc-muted, #77777f); }
+
   /* ── stage ───────────────────────────────────────────────────────────── */
   .dc-stage { padding: 10px 13px 0; min-width: 0; }
   /* resize:vertical is the whole height story — a canvas is never the right
-     height by default, and there is no `height` param in CONTRACT §1.1. */
+     height by default, and there is no `height` param in CONTRACT §1.1.
+
+     ── SCROLL CONTAINMENT ────────────────────────────────────────────────
+     A wheel inside the canvas that finds nothing scrollable does not stop: it
+     CHAINS OUT of the frame and scrolls the surface page, carrying the pane off
+     screen. It is the loudest symptom of an artboard left at the editor's silent
+     800×600 default, because the seeded artboard document is pinned by
+     `html,body{height:100%}` and has no scroller of its own to absorb the wheel.
+
+     `overscroll-behavior: contain` on THIS box is what stops it, and — of the
+     four mechanisms tried — it is the only one that does. Measured with real
+     compositor gestures (CDP Input.synthesizeScrollGesture, not a scripted
+     scrollBy, which fires no wheel at all) against a faithful nest: shadow-root
+     pane → same-origin canvas frame → opaque-sandboxed artboard frame with no
+     scroll container in it. Three runs, identical every time — page scroll after
+     three wheel ticks over the artboard:
+
+       baseline                          200px   ← the bug
+       contain on this wrap                0px   ← the fix
+       a 1px scroll port, no contain     100px   absorbs one tick, then chains
+       wheel listener in the parent doc  200px   AND IT NEVER FIRED
+
+     That last row is the one worth writing down: a wheel inside a child frame is
+     not observable from the parent document at all, so `preventDefault()` is not
+     on the table here, however the listener is bound. In all four the canvas kept
+     its own wheel zoom (its handler ran 18–24× over the canvas background) and
+     the page still scrolled normally with the pointer outside the pane, so this
+     contains the wheel without trapping it. The trade is the usual one for an
+     embedded editor: while the pointer is over the canvas, the wheel is the
+     canvas's.
+
+     `overflow: auto` + `.dc-sink` give the declaration a real scroll port to bind
+     to. That is not what does the work in this engine — contain alone sufficed —
+     but a container with NO scrollable overflow is skipped by some scroll chains,
+     and one hidden 1px box is a cheap way not to depend on which. buildWrap()
+     snaps the 1px straight back, so it costs no visible shift. */
   .dc-wrap { position: relative; width: 100%; height: 62vh; min-height: 300px;
-             resize: vertical; overflow: hidden;
+             resize: vertical; overflow: auto; overscroll-behavior: contain;
+             scrollbar-width: none;
              border: 1px solid var(--wc-border, #e2e2e6); border-radius: var(--wc-radius, 8px);
              background: var(--wc-bg, #fff); }
+  .dc-wrap::-webkit-scrollbar { width: 0; height: 0; }
+  .dc-sink { position: absolute; top: 0; left: 0; width: 1px; height: calc(100% + 1px);
+             visibility: hidden; pointer-events: none; }
   .dc-wrap iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0;
                     display: block; background: var(--wc-bg, #fff); }
 
@@ -230,6 +292,9 @@
       <span class="dc-mark" data-mark></span>
       <span class="dc-title" data-title>Design canvas</span>
       <span class="dc-badge" data-badge title="Canvas state">waiting</span>
+      <!-- Edit mode (CONTRACT §9.5). Hidden until the editor's Save has actually
+           been pressed once: a chip that says nothing is noise. -->
+      <span class="dc-badge" data-save hidden></span>
       <span class="dc-flash" data-flash></span>
       <span class="dc-sp"></span>
       <button class="dc-btn dc-btn-s" data-pin type="button">Pin mode</button>
@@ -670,6 +735,11 @@ if (typeof module === 'object' && module !== null && module.exports) {
   function arr(v) { return Array.isArray(v) ? v : []; }
   function obj(v) { return v && typeof v === 'object' ? v : null; }
   function num(v) { const n = Number(v); return Number.isFinite(n) ? n : null; }
+  // `num` coerces null to 0, because `Number(null)` is 0. That is right for a
+  // counter and wrong for a geometry field, and CONTRACT §2.1 says every field of
+  // an artboard entry but `file` may be null — so an artboard nothing has sized
+  // read as "0 × 0" rather than as unsized. This is the reader for those fields.
+  function px(v) { return v == null || v === '' ? null : num(v); }
 
   const NS = 'http://www.w3.org/2000/svg';
   // Author-controlled geometry only — nothing here comes out of the canvas.
@@ -683,6 +753,8 @@ if (typeof module === 'object' && module !== null && module.exports) {
     file:   [['path', { d: 'M9 2.5H4.6a1.4 1.4 0 0 0-1.4 1.4v8.2a1.4 1.4 0 0 0 1.4 1.4h6.8a1.4 1.4 0 0 0 1.4-1.4V6.2z' }],
              ['path', { d: 'M9 2.5v3.7h3.8' }]],
     off:    [['circle', { cx: 8, cy: 8, r: 5.6 }], ['path', { d: 'M4.4 4.4 11.6 11.6' }]],
+    save:   [['path', { d: 'M8 2.6v6.8M5.3 6.9 8 9.6l2.7-2.7' }],
+             ['path', { d: 'M2.9 10.9v1.5a1.2 1.2 0 0 0 1.2 1.2h7.8a1.2 1.2 0 0 0 1.2-1.2v-1.5' }]],
   };
   function icon(name, cls) {
     const spec = ICONS[name] || ICONS.info;
@@ -744,6 +816,7 @@ if (typeof module === 'object' && module !== null && module.exports) {
   // ── elements ────────────────────────────────────────────────────────────
   const els = {
     mark: $('[data-mark]'), title: $('[data-title]'), badge: $('[data-badge]'),
+    save: $('[data-save]'),
     flash: $('[data-flash]'), sub: $('[data-sub]'), banner: $('[data-banner]'),
     stage: $('[data-stage]'), files: $('[data-filespanel]'), ask: $('[data-ask]'),
     askWhat: $('[data-ask-what]'), askNote: $('#dsn-ask-note'), askFine: $('[data-ask-fine]'),
@@ -767,6 +840,13 @@ if (typeof module === 'object' && module !== null && module.exports) {
   let wrapNode = null, frame = null, ov = null, dockNode = null, armbar = null;
   let armed = false, pins = [], popEl = null;
   let askOpen = false, filesOpen = false, escalated = false;
+  // Edit mode (CONTRACT §9.5). `hostSpliced` is null until a frame has been
+  // mounted, then true/false — false means the carrier had no <head> to splice
+  // the host object into, so the editor booted read-only and there is no Save.
+  let hostSpliced = null;
+  // The last thing Save did. `phase` is idle|saving|saved|failed.
+  let saveState = { phase: 'idle', at: 0, written: [], unchanged: [], orphaned: [],
+                    backup: '', error: '', hint: '' };
   let flashTimer = null, pollTimer = null, rafId = 0, lastGeomSig = '', lastMeasure = 0;
   const markerEls = new Map();       // pin id -> marker element
   const srcHashes = new Map();       // artboard file -> fingerprint of its serialised source
@@ -884,6 +964,7 @@ if (typeof module === 'object' && module !== null && module.exports) {
     els.badge.textContent = label;
     els.badge.className = 'dc-badge' + (tone ? ' ' + tone : '');
     els.badge.title = tip;
+    paintSaveBadge();
 
     els.sub.replaceChildren();
     const bits = [];
@@ -918,8 +999,14 @@ if (typeof module === 'object' && module !== null && module.exports) {
       : (canPin
         ? 'Arm a click-to-pin overlay over the canvas. While it is armed the canvas cannot be panned or zoomed.'
         : 'Available once the canvas is on screen.');
-    els.reseedBtn.disabled = offline();
-    els.reseedBtn.title = offline()
+    // Held while a Save is in flight: a re-seed remounts the frame, and doing
+    // that to a document the user is part-way through writing to disk is the
+    // one interleaving that could look like lost work.
+    const saving = saveState.phase === 'saving';
+    els.reseedBtn.disabled = offline() || saving;
+    els.reseedBtn.title = saving
+      ? 'Waiting for the Save in flight to finish.'
+      : offline()
       ? 'Nothing is listening here — this is a snapshot, not the live surface.'
       : 'Re-run the seeding helper over the current files (dsn_ctl op reseed). Always safe.';
     els.askBtn.disabled = offline();
@@ -942,12 +1029,134 @@ if (typeof module === 'object' && module !== null && module.exports) {
     b.appendChild(line(el('div'), parts));
     return b;
   }
+
+  // ── framing: where each artboard's frame size came from ──────────────────
+  //
+  // `dsn_canvas.layout` and `dsn_canvas.frames` (CONTRACT §2.1) are the service
+  // saying how it arrived at each `w`×`h`. It earns a line on screen because of
+  // what the editor does when nobody tells it: an artboard nothing sizes is framed
+  // at a silent 800×600 — the helper does not warn either, since its numeric check
+  // only reports an x/y/w/h that is present and non-numeric. A 1288-wide design in
+  // an 800×600 frame is drawn small (fit never scales up) or clipped with no way to
+  // reach the rest (fill, because a seeded artboard document is pinned by
+  // `html,body{height:100%}` and the canvas gives it no scroller). Neither state
+  // explains itself. This does.
+  //
+  // §2.1: "The pane MUST surface `source` next to the size." A frame that is a
+  // guess has to look like a guess.
+  const FRAME_SOURCE = {
+    'canvas.json': 'you wrote it in canvas.json',
+    '$preview': 'the design’s own $preview hint',
+    'root-style': 'the root element’s own px size',
+    'param': 'the frame_w / frame_h params',
+    'wide-scan': 'the widest px width in the file — a guess',
+    'default': 'a fallback — nothing in the file gave a size',
+  };
+  // `source: null` is not a missing value, it is a finding: nothing sized this
+  // artboard, so the editor's own default is what it gets.
+  const NO_SOURCE = 'nothing sized it — the editor’s own default';
+  // The rungs that are inference rather than declaration, plus the un-sized case.
+  // They set the tone of the banner, because they are the ones that can be wrong.
+  const FRAME_GUESSED = { 'wide-scan': 1, 'default': 1 };
+  const sourceText = (src) => (src ? (FRAME_SOURCE[src] || src) : NO_SOURCE);
+  // What the editor frames an artboard at when the manifest does not (payload
+  // constants jT/GT, applied by its own normaliser).
+  const DEFAULT_FRAME = '800 × 600';
+  function frames() {
+    return arr(canvas && canvas.frames).filter((f) => f && s(f.file)).map((f) => ({
+      // Same discipline as everything else that names an artboard: prefer OUR
+      // index, and cap anything that is not in it (CONTRACT §4.4, §9.3).
+      file: indexHas(s(f.file)) ? s(f.file) : capFrame(f.file),
+      w: px(f.w), h: px(f.h),
+      source: f.source == null ? null : s(f.source),
+      expand: f.expand == null ? null : s(f.expand),
+    }));
+  }
+  function frameFor(file) {
+    for (const f of frames()) if (f.file === s(file)) return f;
+    return null;
+  }
+  // The lead sentence is chosen by `layout`, not guessed from the rows: "we
+  // generated this" and "we filled the gaps you left" are different claims about
+  // the user's own file, and only one of them is ever true.
+  const LAYOUT_LEAD = {
+    synthesised: ['There is no ', ['code', null, 'canvas.json'],
+      ' in the working folder, so this pack generated the layout — including the frame each artboard is drawn at. '],
+    'user-filled': ['Your ', ['code', null, 'canvas.json'],
+      ' left some keys out, so this pack filled in those and only those; everything you wrote was passed through untouched. '],
+    none: ['There is no ', ['code', null, 'canvas.json'], ' and no layout was generated, so every artboard is framed at the editor’s own default. '],
+  };
+  function framingBanner() {
+    const lead = LAYOUT_LEAD[s(canvas && canvas.layout)];
+    if (!lead) return null;                       // "user", or no seed yet
+    const rows = frames().filter((f) => f.source !== 'canvas.json');
+    const guessed = rows.some((f) => !f.source || FRAME_GUESSED[f.source]);
+    const b = el('div', 'dc-bn' + (guessed ? ' warn' : ''));
+    b.appendChild(icon(guessed ? 'warn' : 'info'));
+    const t = el('div');
+    line(t, lead.concat(['That default is ', ['code', null, DEFAULT_FRAME],
+      ', applied silently, which is what makes a wide design look shrunk — or clipped, with nothing to scroll.']));
+    if (rows.length) {
+      const g = el('div', 'dc-frames');
+      for (const f of rows.slice(0, 8)) {
+        const n = el('div', 'f', f.file);
+        n.title = f.file;
+        g.appendChild(n);
+        g.appendChild(el('div', 'd', f.w != null && f.h != null
+          ? Math.round(f.w) + ' × ' + Math.round(f.h) : DEFAULT_FRAME));
+        g.appendChild(el('div', 's', sourceText(f.source) + (f.expand === 'fill' ? ' · fill' : '')));
+      }
+      t.appendChild(g);
+      if (rows.length > 8) t.appendChild(el('div', 'dc-fine', '+ ' + (rows.length - 8) + ' more'));
+    }
+    t.appendChild(line(el('div', 'dc-fine'), ['Yours to take over: write the size into a ',
+      ['code', null, 'canvas.json'], ' in that folder — an explicit one always wins — or ask Claude to re-mount this pane with ',
+      ['code', null, 'frame_w'], ' / ', ['code', null, 'frame_h'], '.']));
+    b.appendChild(t);
+    return b;
+  }
+
+  // The helper's entry-artboard warning, made actionable. Verbatim it reads
+  //   no --artboard is Main.dc.html — the editor will treat X as the entry
+  //   artboard; name the entry Main.dc.html unless you are re-seeding …
+  // which is accurate, correct, and completely inert on screen: it was shown to a
+  // user who then did not act on it. The fix is a single rename, so lead with the
+  // rename. Matched on the stable head of the string, never on its punctuation —
+  // the em dash and the wording after it are the helper's to change.
+  const ENTRY_MARK = 'no --artboard is Main.dc.html';
+  function entryArtboardName(w) {
+    const i = w.indexOf('will treat ');
+    const j = w.indexOf(' as the entry artboard');
+    if (i < 0 || j <= i + 11) return '';
+    const raw = w.slice(i + 11, j).trim();
+    return indexHas(raw) ? raw : capFrame(raw);
+  }
+  function entryBanner(text) {
+    const name = entryArtboardName(text);
+    const b = el('div', 'dc-bn warn');
+    b.appendChild(icon('warn'));
+    const t = el('div');
+    t.appendChild(el('b', null, 'Nothing here is called Main.dc.html.'));
+    line(t, [' The editor picks its entry artboard by ', ['b', null, 'name'], ', not by order, so it opens ',
+      name ? ['code', null, name] : 'whichever artboard the helper saw first',
+      ' instead. Rename the one that should open first to ', ['code', null, 'Main.dc.html'],
+      ' and reseed — unless you are re-seeding a canvas whose Main was deleted, in which case this is expected.']);
+    b.appendChild(t);
+    return b;
+  }
+
   function paintBanner() {
     const out = [];
+    // The one thing that must not scroll past: what the last Save did to files
+    // on disk. First, above everything informational.
+    const srb = saveResultBanner();
+    if (srb) out.push(srb);
     if (ISOLATE && !IS_PREVIEW) {
-      out.push(bn('', 'off', ['Isolate mode: the canvas frame is sandboxed to an opaque origin, so it is viewer-only and ',
-        ['b', null, 'pins are off'],
-        '. Nothing inside it can reach this daemon — the trade is that nothing here can read its artboard geometry either.']));
+      out.push(bn('', 'off', ['Isolate mode: the canvas frame is sandboxed to an opaque origin, so it is viewer-only — ',
+        ['b', null, 'pins are off and there is no Save'],
+        '. No host object is installed in an isolated frame, so the editor boots read-only by its own design (CONTRACT §9.5); ',
+        'nothing inside it can reach this daemon, and nothing here can read its artboard geometry. Remount without ',
+        ['code', null, 'isolate'], ' to edit.']));
     }
     if (!SECURE && !IS_PREVIEW) {
       out.push(bn('warn', 'warn', ['This surface is not a secure context (', ['code', null, ORIGIN || 'this origin'],
@@ -958,20 +1167,32 @@ if (typeof module === 'object' && module !== null && module.exports) {
       out.push(bn('warn', 'warn', ['The canvas loaded but no artboards appeared in it. Reseed, or ask Claude to run the helper’s ',
         ['code', null, '--check'], ' over the working files.']));
     }
+    const eb = editBanner();
+    if (eb) out.push(eb);
     // Additive fields the service publishes beyond CONTRACT §2.1/§2.2. A canvas
     // that seeded with warnings is not a canvas that seeded cleanly, and the
     // helper's advisory stderr is the only place that difference is visible.
+    //
+    // The entry-artboard one is lifted out and rewritten as an instruction; the
+    // rest stay verbatim, because paraphrasing the helper loses the fix.
     const warns = arr(canvas && canvas.warnings).map((w) => s(w).trim()).filter(Boolean);
-    if (warns.length) {
+    const entry = warns.filter((w) => w.indexOf(ENTRY_MARK) >= 0);
+    const rest = warns.filter((w) => w.indexOf(ENTRY_MARK) < 0);
+    if (entry.length) out.push(entryBanner(entry[0]));
+    if (rest.length) {
       const b = el('div', 'dc-bn warn');
       b.appendChild(icon('warn'));
       const t = el('div');
       t.appendChild(el('b', null, 'The helper seeded this canvas, with warnings.'));
-      for (const w of warns.slice(0, 5)) t.appendChild(el('div', 'dc-mono', w.slice(0, 400)));
-      if (warns.length > 5) t.appendChild(el('div', 'dc-fine', '+ ' + (warns.length - 5) + ' more'));
+      for (const w of rest.slice(0, 5)) t.appendChild(el('div', 'dc-mono', w.slice(0, 400)));
+      if (rest.length > 5) t.appendChild(el('div', 'dc-fine', '+ ' + (rest.length - 5) + ' more'));
       b.appendChild(t);
       out.push(b);
     }
+    // Last of the informational banners, because it explains a picture the user
+    // can already see rather than a thing they must fix.
+    const fb = framingBanner();
+    if (fb) out.push(fb);
     if (!canvas && escalated) {
       out.push(bn('warn', 'warn', ['Nothing from the design-canvas service yet. If it has not been approved on this machine, run ',
         ['code', null, TRUST],
@@ -1136,10 +1357,25 @@ if (typeof module === 'object' && module !== null && module.exports) {
       const n = el('div', 'n', s(a.file));
       n.title = s(a.file);
       c.appendChild(n);
-      const w = num(a.w), h = num(a.h);
+      // The size, and — CONTRACT §2.1 — where it came from, at the one other place
+      // a frame size is written down. A card never shows a number with no
+      // provenance, and an artboard nothing sized says so instead of showing a
+      // blank where the editor's silent 800 × 600 will be.
+      const f = frameFor(a.file);
+      const w = px(a.w), h = px(a.h);
       c.appendChild(el('div', 'm', w != null && h != null
         ? Math.round(w) + ' × ' + Math.round(h)
-        : 'laid out by the helper'));
+        : (f ? DEFAULT_FRAME : 'laid out by the helper')));
+      if (f && f.source !== 'canvas.json') {
+        const src = el('div', 'dc-fine', sourceText(f.source));
+        // w and h can come off different rungs; the card shows the one that
+        // ranks, and the tooltip shows both when they disagree.
+        const ws = s(a.w_source), hs = s(a.h_source);
+        src.title = (ws && hs && ws !== hs)
+          ? 'Width ' + sourceText(ws) + '; height ' + sourceText(hs) + '.'
+          : 'How this frame size was derived.';
+        c.appendChild(src);
+      }
       grid.appendChild(c);
     }
     return grid;
@@ -1365,6 +1601,18 @@ if (typeof module === 'object' && module !== null && module.exports) {
   function buildWrap() {
     if (wrapNode) return wrapNode;
     wrapNode = el('div', 'dc-wrap');
+    // The scroll port that gives `overscroll-behavior: contain` something to bind
+    // to (see the .dc-wrap rules). One hidden 1px box, and the 1px it can travel
+    // is snapped straight back — the containment is the point, the scrolling is
+    // not. currentTarget rather than the closure, because teardownFrame() nulls
+    // wrapNode while this listener is still on the element.
+    const sink = el('i', 'dc-sink');
+    sink.setAttribute('aria-hidden', 'true');
+    wrapNode.appendChild(sink);
+    wrapNode.addEventListener('scroll', (e) => {
+      const n = e.currentTarget;
+      if (n && (n.scrollTop || n.scrollLeft)) { n.scrollTop = 0; n.scrollLeft = 0; }
+    }, { passive: true });
     ov = el('div', 'dc-ov');
     ov.addEventListener('click', onOverlayClick);
     dockNode = el('div', 'dc-dock');
@@ -1390,8 +1638,123 @@ if (typeof module === 'object' && module !== null && module.exports) {
     markerEls.clear();
     wrapNode = null; ov = null; dockNode = null; armbar = null;
     booted = null;
+    hostSpliced = null;
     stopAll();
   }
+
+  // ── the host object (CONTRACT §9.5) ──────────────────────────────────────
+  //
+  // ONE member — `claude.self.publish(html)` — installed before any payload
+  // script runs, which is the whole difference between an editor and a viewer:
+  // Save, undo/redo, zoom, click-to-select with the quick menu, inline
+  // rich-text editing. Proven end to end in a real browser against a real
+  // seeded canvas on 127.0.0.1 (`scratch/shim-probe.mjs` — this is that SHIM,
+  // with the probe's in-memory capture replaced by the transport below).
+  //
+  // `use()` is deliberately NOT defined: it is not required (the host-usable
+  // check is an OR) and defining it switches on presence probing a single-user
+  // local host has no business doing. No `db`, no `room` and no published
+  // Artifact is served either — CONTRACT §9.2 is untouched by edit mode.
+  //
+  // Both script tags are assembled from pieces, because the shell parses this
+  // pane's html with the HTML parser and one literal closing tag would end the
+  // pane script early. The state-block marker is assembled for a second reason,
+  // the same one DOC_MARK is assembled for below: the fully quoted form of that
+  // id attribute is one of the upstream markers `scripts/check-no-vendored.mjs`
+  // fails a tracked file for, so this pane recognises the state block without
+  // ever writing that literal down (CONTRACT §9.1).
+  const HOST_SHIM = '<' + 'script>\n' + `
+(function () {
+  var seq = 0;
+  var MARK = '<' + 'script type="application/json" id="appifact-' + 'doc';
+  var ALT = new RegExp('<' + 'script[^>]*appifact-' + 'doc[^>]*>', 'i');
+  var END = '<' + '/script>';
+
+  // The state block, and ONLY the state block: 19,777 bytes of a 2,495,380-byte
+  // page on the fixture (0.79%), and the helper's own --extract accepts a
+  // minimal page carrying just it (CONTRACT §6.6). ALT covers a re-serialisation
+  // that reordered the attributes; [^>]* cannot cross a tag, so the payload's
+  // own scripts mentioning that id in code can never match it.
+  function stateBlock(page) {
+    var i = page.indexOf(MARK);
+    if (i < 0) { var m = ALT.exec(page); i = m ? m.index : -1; }
+    if (i < 0) return null;
+    var e = page.indexOf(END, i);
+    return e < 0 ? null : page.slice(i, e + END.length);
+  }
+
+  globalThis.claude = {
+    self: {
+      publish: function (html) {
+        var n = ++seq;
+        var page = typeof html === 'string' ? html : '';
+        var block = page ? stateBlock(page) : null;
+        // ERROR DISCIPLINE — CONTRACT §9.5. Every rejection in this function is
+        // a PLAIN Error and nothing else. A plain Error normalises to a
+        // recoverable failure: one retry, then "Saving failed — your changes
+        // are kept", document still editable and still dirty. A rejection
+        // carrying not_writer / not_declared / capability_disabled /
+        // capability_removed instead writes a sticky sessionStorage read-only
+        // pin that CANNOT be cleared from the UI, and in a srcdoc frame that
+        // key is tab-global — one of them bricks editing for the whole tab.
+        // Never construct those values; do not "improve" these rejections.
+        if (!block) return Promise.reject(new Error(
+          'could not find the canvas state block in the document the editor handed over'));
+        if (block.length > 33554432) return Promise.reject(new Error(
+          'the canvas state block is over 32 MB, past what the save path carries'));
+        return new Promise(function (resolve, reject) {
+          var settled = false, timer = null;
+          function finish(ok, message) {
+            if (settled) return;
+            settled = true;
+            try { window.removeEventListener('message', onAck); } catch (e) {}
+            if (timer) { clearTimeout(timer); timer = null; }
+            if (ok) resolve();
+            else reject(new Error(message || 'the save did not complete'));   // plain Error ONLY
+          }
+          function onAck(e) {
+            if (e.source !== parent) return;
+            var d = e.data;
+            if (!d || d.wcdc !== 'save-ack' || d.n !== n) return;
+            finish(d.ok === true, typeof d.error === 'string' ? d.error : '');
+          }
+          window.addEventListener('message', onAck);
+          timer = setTimeout(function () {
+            finish(false, 'the pane did not answer within three minutes');
+          }, 180000);
+          // The frame NEVER learns the endpoint (CONTRACT §6.6): it hands the
+          // block to the pane, and the pane is the only thing that talks to the
+          // listener. '*' is safe — the sole recipient is this frame's parent.
+          try {
+            parent.postMessage({ wcdc: 'save', n: n, block: block, full: page.length }, '*');
+          } catch (err) {
+            finish(false, 'could not hand the state block to the pane that mounted this canvas');
+          }
+        });
+      }
+    }
+  };
+  try { console.log('[wc-design] host object installed before payload scripts'); } catch (e) {}
+})();
+` + '\n' + '<' + '/script>\n';
+
+  // Splice AFTER <head> — a splice, never a rewrite (CONTRACT §9.5). In the
+  // payload <head> opens at byte 33 and the first payload script is ~490 KB in,
+  // so one tag at the head boundary runs before everything and touches nothing
+  // else: verified, script-tag count 22 → 23, state block byte-identical. Null
+  // when there is no head, and then the document is passed through untouched
+  // rather than repaired.
+  function spliceHost(page) {
+    let at = -1;
+    const i = page.indexOf('<head>');
+    if (i >= 0) at = i + 6;
+    else {
+      const m = /<head\b[^>]*>/i.exec(page.slice(0, 65536));
+      if (m) at = m.index + m[0].length;
+    }
+    return at < 0 ? null : page.slice(0, at) + '\n' + HOST_SHIM + page.slice(at);
+  }
+
   function mountFrame(src) {
     const w = buildWrap();
     const f = document.createElement('iframe');
@@ -1405,7 +1768,19 @@ if (typeof module === 'object' && module !== null && module.exports) {
     if (frame) frame.remove();
     frame = f;
     w.insertBefore(f, ov);
+    // Edit mode. The host object goes in BEFORE the srcdoc is assigned — the
+    // frame must never be handed a document it then has to be patched into.
+    // Isolate mode gets no host object at all: an opaque-origin frame is for
+    // viewing something not locally authored, and the editor's own read-only
+    // boot is the correct behaviour there (said out loud in paintBanner).
+    if (ISOLATE) { hostSpliced = false; }
+    else {
+      const withHost = spliceHost(src);
+      hostSpliced = withHost !== null;
+      if (withHost !== null) src = withHost;
+    }
     f.srcdoc = src;
+    src = '';
   }
 
   function frameDoc() {
@@ -2051,6 +2426,232 @@ if (typeof module === 'object' && module !== null && module.exports) {
   }
 
   // ═════════════════════════════════════════════════════════════════════════
+  // EDIT MODE — carrying the Save across (CONTRACT §6.6, §9.5)
+  // ═════════════════════════════════════════════════════════════════════════
+  //
+  //   editor Save → claude.self.publish(completeDocument)        [in the frame]
+  //     → the shim parses out the state block, 0.79% of the bytes
+  //     → parent.postMessage to THIS pane                        [frame → pane]
+  //     → the pane checks the sender, wraps the block in a minimal page and
+  //       POSTs it to the service's loopback listener            [pane → service]
+  //     → the service runs the helper's own --extract and writes the user's
+  //       own .dc.html files: extract first, back up, write-then-rename (§6.4)
+  //     → the pane acks; the shim's promise resolves, or rejects with a plain
+  //       Error and the editor keeps the user's changes
+  //
+  // The frame never learns the endpoint, and the block never goes near the
+  // store: POST /api/store puts a whole patch into the event ring, the WS frame
+  // and every SSE subscriber, and graph.js snapshots the store into every
+  // committed node — a canvas with images would be copied there forever (§6.6).
+  const SAVE_TIMEOUT_MS = 150000;   // inside the shim's own 180 s, so the pane answers first
+  const SAVE_LABEL = { saving: ['saving…', 'work'], saved: ['saved', 'ok'], failed: ['save failed', 'bad'] };
+
+  function paintSaveBadge() {
+    const pair = SAVE_LABEL[saveState.phase];
+    els.save.hidden = !pair;
+    if (!pair) return;
+    els.save.textContent = pair[0];
+    els.save.className = 'dc-badge ' + pair[1];
+    els.save.title = saveState.phase === 'failed'
+      ? 'The last Save did not write. Your changes are still in the editor — press Save again.'
+      : (saveState.phase === 'saving'
+        ? 'Writing the edited artboards back to your working files.'
+        : 'Written to your working files ' + (relTime(saveState.at) || 'just now') + '.');
+  }
+
+  // Where the service says to POST. From the adopted dsn_canvas first and the
+  // live store second — the seq guard refuses a repeat, so an endpoint
+  // republished without a bump would otherwise be invisible here.
+  function saveEndpoint() {
+    let e = obj(canvas && canvas.save_endpoint);
+    if (!e) {
+      try { const raw = obj(store.get('dsn_canvas')); e = raw ? obj(raw.save_endpoint) : null; }
+      catch (err) { e = null; }
+    }
+    const url = e ? s(e.url) : '';
+    if (!url) return null;
+    let u = null;
+    try { u = new URL(url, ORIGIN || undefined); } catch (err) { return null; }
+    // LOOPBACK ONLY, and this is not decoration. `dsn_canvas` is an ordinary
+    // store value, and the store is writable by anything that can reach POST
+    // /api/store — Claude, a local driver, another pane, and (same-origin) the
+    // canvas frame itself. Unchecked, one forged write would point this pane at
+    // an arbitrary host and hand it the user's whole design. The service's
+    // listener is bound to 127.0.0.1 (§6.6), so anything else is a forgery.
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') return null;
+    const h = u.hostname.toLowerCase();
+    if (h !== '127.0.0.1' && h !== 'localhost' && h !== '::1' && h !== '[::1]') return null;
+    return { url: u.href, token: s(e.token) };
+  }
+  // The token is a per-spawn random PATH token. A url that already carries it is
+  // used as it stands; otherwise it is appended, so both shapes work.
+  function saveUrl(ep) {
+    if (!ep.token || ep.url.indexOf(ep.token) >= 0) return ep.url;
+    return ep.url.replace(/\/+$/, '') + '/' + encodeURIComponent(ep.token);
+  }
+
+  // The minimal page the block travels in: ~21 KB against the 2.4 MB document,
+  // and --extract reads it happily (verified — exit 0, empty stderr, all four
+  // files recovered). Static on both sides; only the body comes from the frame.
+  const MINI_HEAD = '<!doctype html>\n<html lang="en">\n<head>\n<meta charset="utf-8">\n' +
+    '<title>wc-design save handover</title>\n</head>\n<body>\n';
+  const MINI_TAIL = '\n</body>\n</html>\n';
+  const nameList = (v) => arr(v).slice(0, 12).map(capFrame).filter(Boolean);
+
+  // POST the handover. Deliberately a CORS *simple* request: POST, a string
+  // body (fetch stamps text/plain;charset=UTF-8 on it) and NOT ONE custom
+  // header. Adding a header — content-type: application/json, a token header,
+  // anything — makes the browser send a preflight OPTIONS first, and the
+  // listener answers POST only (§6.6), so the save would die before the body
+  // was sent. The body is JSON text; `doc` is the complete minimal page, which
+  // is what --extract consumes and what writeBack({ docHtml }) takes.
+  // !! Wire format, keep in sync with service.js !!
+  //   { token, mount, seq, at, doc, doc_bytes, block_bytes, full_bytes }
+  //   ← { ok, written[], unchanged[], orphaned[], backup_dir, error, hint }
+  async function postSave(ep, body) {
+    const ctl = (typeof AbortController === 'function') ? new AbortController() : null;
+    let timedOut = false;
+    const timer = setTimeout(() => { timedOut = true; try { ctl && ctl.abort(); } catch (e) {} }, SAVE_TIMEOUT_MS);
+    try {
+      const r = await fetch(saveUrl(ep), {
+        method: 'POST', body: JSON.stringify(body),
+        cache: 'no-store', credentials: 'omit', mode: 'cors',
+        signal: ctl ? ctl.signal : undefined,
+      });
+      let j = null, text = '';
+      try { text = await r.text(); } catch (e) { text = ''; }
+      if (text) { try { j = obj(JSON.parse(text)); } catch (e) { j = null; } }
+      const err = j ? s(j.error) : '', hint = j ? s(j.hint || j.stderr) : '';
+      const backup = j ? s(j.backup_dir || j.backupDir) : '';
+      if (!r.ok) return { ok: false, backup: backup, hint: hint || capFrame(text),
+        error: err || ('the save listener answered HTTP ' + r.status) };
+      if (j && j.ok === false) return { ok: false, backup: backup, hint: hint,
+        error: err || 'the service refused the save' };
+      return { ok: true, backup: backup, written: nameList(j && j.written),
+        unchanged: nameList(j && j.unchanged), orphaned: nameList(j && j.orphaned) };
+    } catch (e) {
+      if (timedOut) return { ok: false, error: 'the save timed out after ' + Math.round(SAVE_TIMEOUT_MS / 1000) + 's' };
+      // A CORS refusal and a dead listener are the same TypeError to a page, so
+      // name both rather than guessing at one.
+      return { ok: false, error: 'could not reach the save listener',
+        hint: s(e && e.message) + ' — the service may have stopped (one runs only while its pane is on '
+          + 'the active node with a browser watching), or its listener refused this origin.' };
+    } finally { clearTimeout(timer); }
+  }
+
+  // frame → pane. THE source check is identity on the window object (§6.6): a
+  // message is honoured only when it came from the exact iframe this pane
+  // mounted, so a nested frame inside the canvas, another pane, or the surface
+  // page itself cannot drive a write to the user's files. Never throws: a
+  // rejection here would leave the editor waiting on a promise nobody settles.
+  async function onFrameMessage(e) {
+    if (!alive()) { window.removeEventListener('message', onFrameMessage); return; }
+    const d = e && e.data;
+    if (!d || typeof d !== 'object' || d.wcdc !== 'save') return;
+    if (ISOLATE) return;                                   // no host object was installed there
+    if (!frame || !e.source || e.source !== frame.contentWindow) return;
+
+    const n = num(d.n) || 0;
+    const block = typeof d.block === 'string' ? d.block : '';
+    // The ack settles the shim's promise; `ok:false` becomes a plain Error over
+    // there — see the error-discipline note in the shim, which is the one thing
+    // in this path that can brick a tab. The ack carries no secret (never the
+    // endpoint, never the token), so '*' is right.
+    const ack = (ok, error) => {
+      try { e.source.postMessage({ wcdc: 'save-ack', n: n, ok: !!ok, error: s(error) }, '*'); }
+      catch (err) { /* the frame went away mid-save; the write still happened */ }
+    };
+    const fail = (error, hint, backup) => {
+      saveState = { phase: 'failed', at: Date.now(), written: [], unchanged: [], orphaned: [],
+                    backup: s(backup), error: s(error), hint: s(hint) };
+      ack(false, error);
+      flash('Save failed: ' + s(error), true);
+      paintHead();
+    };
+
+    try {
+      if (block.length < 64) return fail('the editor handed over an empty state block', '');
+      const ep = saveEndpoint();
+      if (!ep) return fail('this pane has no save endpoint to write to',
+        'The service publishes it as dsn_canvas.save_endpoint. Reseed, or ask Claude to check that the '
+        + 'design-canvas service is running and approved (' + TRUST + '). Your edits are still in the editor.');
+
+      saveState = { phase: 'saving', at: Date.now(), written: [], unchanged: [], orphaned: [],
+                    backup: '', error: '', hint: '' };
+      flash('Saving ' + (fmtBytes(block.length) || 'the canvas') + ' back to your files…');
+      paintHead();
+
+      const res = await postSave(ep, {
+        token: ep.token, mount: s(mountId), seq: n, at: Date.now(),
+        doc: MINI_HEAD + block + MINI_TAIL,
+        doc_bytes: MINI_HEAD.length + block.length + MINI_TAIL.length,
+        block_bytes: block.length, full_bytes: num(d.full) || 0,
+      });
+      if (!res.ok) return fail(res.error, res.hint, res.backup);
+      // Ack before anything else: the editor is holding a promise, and it must
+      // be settled even if this pane was replaced while the write was in flight.
+      ack(true, '');
+      if (!alive()) return;                      // the pane went away; the write still landed
+
+      saveState = { phase: 'saved', at: Date.now(), written: arr(res.written),
+                    unchanged: arr(res.unchanged), orphaned: arr(res.orphaned),
+                    backup: s(res.backup), error: '', hint: '' };
+      const w = saveState.written.length;
+      flash(w ? ('Saved · ' + w + ' file' + (w === 1 ? '' : 's') + ' written') : 'Saved · nothing had changed');
+      paintHead();
+    } catch (err) {
+      console.error('design-canvas save', err);
+      fail('the pane failed while saving', s(err && err.message));
+    }
+  }
+
+  // ── the two banners edit mode owns ──────────────────────────────────────
+  function editBanner() {
+    if (IS_PREVIEW || ISOLATE || loadState !== 'ok' || hostSpliced === null) return null;
+    if (hostSpliced === false) {
+      return bn('warn', 'warn', ['Editing is off for this canvas: the carrier the service wrote has no ',
+        ['code', null, '<head>'], ' to install the host object into, so the editor booted read-only. ',
+        'It still pans, zooms and exports. Reseed to try again.']);
+    }
+    if (!saveEndpoint()) {
+      return bn('warn', 'warn', ['Editing is on, but ', ['b', null, 'saving is not wired up'],
+        ': the service has published no ', ['code', null, 'dsn_canvas.save_endpoint'],
+        '. Anything you change stays in this browser. Reseed, or ask Claude to check the service.']);
+    }
+    if (saveState.phase !== 'idle') return null;          // the result banner has the floor
+    const dir = s(files && files.dir);
+    return bn('', 'save', ['Editing is on: the editor’s ', ['b', null, 'Save'], ' writes these artboards back to ',
+      dir ? ['code', null, dir] : 'your working folder', ' through the helper’s own ',
+      ['code', null, '--extract'], ' — every file it replaces is backed up first, and nothing is deleted.']);
+  }
+
+  function saveResultBanner() {
+    const st = saveState, w = st.written.length;
+    if (st.phase !== 'saved' && st.phase !== 'failed') return null;
+    const okc = st.phase === 'saved';
+    const b = el('div', 'dc-bn ' + (okc ? 'ok' : 'bad'));
+    b.appendChild(icon(okc ? 'save' : 'warn'));
+    const t = el('div');
+    if (okc) {
+      t.appendChild(el('b', null, w ? 'Saved · ' + w + ' file' + (w === 1 ? '' : 's') + ' written to disk.'
+                                   : 'Saved · your files already said this.'));
+      if (w) t.appendChild(el('div', 'dc-mono', st.written.join(', ')));
+      if (st.unchanged.length) t.appendChild(el('div', 'dc-fine', 'Unchanged: ' + st.unchanged.join(', ')));
+      if (st.orphaned.length) t.appendChild(line(el('div', 'dc-fine'), ['Gone from the saved canvas and ',
+        ['b', null, 'left alone'], ' on disk: ', st.orphaned.join(', '), '. Delete them yourself if that was deliberate.']));
+    } else {
+      t.appendChild(el('b', null, 'Save failed — ' + st.error + '.'));
+      t.appendChild(el('div', null, 'Your working files are as they were and your changes are still in '
+        + 'the editor. Press Save again once the cause is fixed.'));
+      if (st.hint) t.appendChild(el('div', 'dc-mono', st.hint.slice(0, 800)));
+    }
+    if (st.backup) t.appendChild(el('div', 'dc-fine',
+      (okc ? 'The versions you had before this save: ' : 'A backup of the files as they were: ') + st.backup));
+    b.appendChild(t);
+    return b;
+  }
+
+  // ═════════════════════════════════════════════════════════════════════════
   // WIRING
   // ═════════════════════════════════════════════════════════════════════════
   function readStore() {
@@ -2066,6 +2667,13 @@ if (typeof module === 'object' && module !== null && module.exports) {
     canvas = v;
     if (!prev || prev.seeded_at !== v.seeded_at || prev.payload_component !== v.payload_component) {
       srcHashes.clear();
+      // A Save writes to `dir`, which the service watches, so it suppresses its
+      // own writes and then re-seeds ONCE deliberately (CONTRACT §6.7). That
+      // re-seed reloads the frame — say why, or the canvas appears to blink and
+      // lose the user's pan and zoom for no reason they can see.
+      if (prev && saveState.phase === 'saved' && Date.now() - saveState.at < 60000) {
+        flash('Reloaded the canvas from the files you just saved.');
+      }
     }
     // Leaving `ready` tears the frame down, so the load must be re-armed or
     // coming back to the same seed would leave an empty wrap on screen.
@@ -2096,6 +2704,10 @@ if (typeof module === 'object' && module !== null && module.exports) {
     store.subscribe('dsn_files', onFiles);
   } catch (e) { console.error('design-canvas subscribe', e); }
   window.addEventListener('resize', onResize);
+  // The frame → pane leg of Save (CONTRACT §6.6). onFrameMessage swallows its
+  // own failures into an ack, so this listener can never reject into nothing —
+  // an unsettled promise here would leave the editor waiting forever.
+  window.addEventListener('message', onFrameMessage);
   setTimeout(() => { if (alive() && !canvas) { escalated = true; repaint(); } }, 6000);
   run();
 </script>

@@ -461,8 +461,8 @@ non-recursive by design).
 
 | path | what it is |
 |---|---|
-| `components/design-canvas/component.html` | the pane — chrome, frame, pin overlay, one screen per state; held well under a self-imposed 128 KB budget (half the tripwire ceiling), and it never carries canvas bytes |
-| `components/design-canvas/service.js` | the host service — payload discovery (§1), seeding through the helper (§2), the runtime-written carrier, `fs.watch` + the `dsn_ctl` control loop; never writes under `dir` |
+| `components/design-canvas/component.html` | the pane — chrome, frame, pin overlay, one screen per state, plus edit mode's host shim and save leg; the self-imposed budget in its own header is 144 KB (it measures 138.3 KB, still ~55% of the 256 KB tripwire ceiling), and it never carries canvas bytes |
+| `components/design-canvas/service.js` | the host service — payload discovery (§1), seeding through the helper (§2), the runtime-written carrier, `fs.watch` + the `dsn_ctl` control loop, and edit mode's loopback save listener; writes under `dir` ONLY through `saveBack()` (CONTRACT §6.4) |
 | `components/design-canvas/seed.js` | browser-side spawn seed for the drawer and command palette; offers back a canvas this surface already seeded, and otherwise offers nothing |
 | `components/design-canvas/meta.json` | params schema; `name` must equal the directory |
 | `scratch/anchor-lib.js` | the anchor grammar of §6 — source, not scratch: inlined into the pane and the subject of the port proof |
@@ -484,14 +484,26 @@ non-recursive by design).
 The open questions this research left are closed, and each answer is now
 contractual.
 
-1. **How edits persist — one-way, files → canvas.** No `claude.self.publish`
-   stand-in, and none is coming: the pane serves no host object, so the editor
-   boots read-only (§3) and the `.dc.html` files stay the only source of truth.
-   The service never writes under `dir`, so nothing can travel back the other way
-   by construction. `--extract` is the helper's way back into files from a canvas
-   edited *somewhere else* and is run by the user, never by this pack. For real
-   WYSIWYG Save, hand off to a published Artifact via the bundled `design` skill.
-   (CONTRACT §9.5.)
+1. **How edits persist — REVERSED IN v0.2: the canvas writes back.** This
+   answer was "one-way, files → canvas", and the reasoning below is kept because
+   it is still why the one-way pipeline was the right *default*. It was reversed
+   deliberately by the repository owner, who runs this against their own files;
+   CONTRACT §9.5 and §6.4 carry the decision.
+   - **What it said.** No `claude.self.publish` stand-in: the pane served no host
+     object, so the editor booted read-only (§3), the `.dc.html` files stayed the
+     only source of truth, and the service never wrote under `dir`, so nothing
+     could travel back by construction. `--extract` was the helper's way back
+     into files from a canvas edited *somewhere else*, run by the user. For a
+     real Save you handed off to a published Artifact via the `design` skill.
+   - **What is true now.** The pane installs exactly ONE host member,
+     `claude.self.publish`, spliced in after `<head>` so it lands before any
+     payload script, and Save is real: the complete document goes to the pane,
+     only its state block (measured 0.85% of the page) travels to a loopback
+     listener the service owns (§6.6), and the service runs that same
+     `--extract` to write the user's own files — extract-first, backed up,
+     write-then-rename, batch rollback, never deleting, `canvas.json` compared
+     by meaning, and the watcher suppressed around it (§6.4, §6.7). The
+     Artifact hand-off is now about *sharing*, not about getting a Save.
 2. **Comment tier — artboard-fraction anchors, no capability injection, no
    web-chat core change** (CONTRACT §4). Anchors are nonetheless minted in the
    payload's own grammar (§6), so the element-precise tier is a v0.2 upgrade

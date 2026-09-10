@@ -1,6 +1,6 @@
 {
   "name": "wc-design",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "A web-chat component pack that mounts a live Claude Design canvas seeded from the .dc.html files in a directory you name. Ships none of Anthropic's code: the editor payload is read at runtime from the copy Claude Code already wrote on this machine.",
   "license": "MIT",
   "private": false,

@@ -39,12 +39,22 @@ The one-sentence shape:
 
 Two properties fall out of that and constrain everything:
 
-1. **The pipeline is one-way.** `.dc.html` files → canvas. Nothing travels back.
-   The pack serves the frame no host capability object at all, so the editor
-   boots read-only from its embedded seed; a design is changed by editing the
-   files on disk and letting the service re-seed. See `CONTRACT.md` §9.5.
-2. **The service never writes inside `dir`.** The user's working files are the
-   user's. Enforced, not asserted — §4.3 below.
+1. **The canvas is editable, and Save writes back to the files.** The pack serves
+   the frame exactly one host member, `self.publish`, which is what makes the
+   editor present its normal editing chrome. A Save hands over the whole document;
+   only its state block travels to the service, which runs the upstream helper's
+   own `--extract` and writes the result into the user's `.dc.html` files. See
+   `CONTRACT.md` §9.5 and §6.6.
+2. **`dir` is written through exactly one door.** `saveBack()` is the only code
+   path permitted to touch the user's files, under seven rules (`CONTRACT.md`
+   §6.4). Everything else — seeding, the carrier, diagnostics — writes to the
+   build tree. Enforced, not asserted; §4.3 below.
+
+> **v0.1.0 was different, deliberately.** It served no host object at all, so the
+> editor booted read-only and the pipeline really was one-way by construction. The
+> reasoning for that is preserved in `extending.md` §1.6 because it is still the
+> right default for a wrapper you do not own. It was reversed by the repository
+> owner, who runs this on their own hardware against their own files.
 
 ---
 
@@ -226,8 +236,16 @@ fail here, legibly, rather than in the child (`slugFromTitle`,
 
 ### 4.3 What the child is allowed to touch
 
-The invariant is "this service never writes to `dir`", and it is enforced at four
-levels:
+The invariant is **"only `saveBack()` writes inside `dir`, and nothing else in the
+service can"**, enforced by two gates rather than one:
+
+- `assertSaveTarget()` guards the one licensed door. It accepts a plain basename
+  resolving inside `dir` and refuses everything else — `../` escapes, subpaths,
+  absolute paths, empty and over-long names.
+- `assertWritable()` guards everything else, and still refuses `dir` outright.
+
+So a write is either a save going through the narrow gate, or it is in the build
+tree. There is no third case. The levels below describe `assertWritable()`:
 
 1. `assertWritable()` (`service.js:355-364`) is the single gate every write in the
    file passes through. It throws for any path outside the two write roots

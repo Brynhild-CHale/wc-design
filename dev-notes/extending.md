@@ -183,6 +183,22 @@ nothing on screen to extract. **Absence is the off switch.** You never have to d
 you did not open. That is a much stronger position than a served-but-neutered capability, and
 it is available here only because the app degrades gracefully; see FINDINGS §3.
 
+> **Superseded in v0.2 — the argument above is kept because it is still correct.**
+> The repository owner, who runs this on their own hardware against their own design
+> files, asked for editing and reaffirmed after the tradeoffs were put to them. So the
+> pack now serves one member, `self.publish`, and Save writes back to the user's own
+> `.dc.html` files through the helper's own `--extract`.
+>
+> What changed is not the reasoning but the situation. The objection above is really
+> two objections: *a stand-in that fakes persistence misleads people*, and *a write
+> path into the user's files is a promise you must test rather than a property you
+> can read*. The first does not apply — this Save durably persists, into the user's
+> source of truth and their git history. The second is simply true, and is now paid
+> for: `CONTRACT.md` §6.4's seven rules, the never-delete and back-up-first
+> guarantees, and a test suite whose negative cases each assert the working directory
+> is byte-identical afterwards. If you fork this and do not want to pay that, serving
+> nothing is still a real and defensible product.
+
 ### 2.2 No binary extraction
 
 The payload is also recoverable directly from the Claude Code executable, byte-identically.
@@ -284,8 +300,8 @@ When you do pay the cost, pay the whole bill:
 Enumerate what the app checks for and what each capability unlocks. Then serve only the ones
 whose feature you actually want.
 
-The question to answer on **day one**: *what does this app do with nothing served?* Here it
-degrades to a read-only viewer — pan, zoom, look, export to PNG/PDF — which is a genuinely
+The question to answer on **day one**: *what does this app do with nothing served?* Here the
+answer was that it degrades to a read-only viewer — pan, zoom, look, export to PNG/PDF — which is a genuinely
 useful product on its own. That is unusually lucky, and it is what made a small v0.1 possible.
 If your app *crashes* with no capabilities, the whole "serve nothing, ship a viewer" tier does
 not exist and your first release is much larger. Find that out before you plan, not after.
@@ -571,7 +587,9 @@ Or: do not. Two canvases on one node is a rare want. Two nodes is free.
 
 The thing that went right was accidental discipline: I asked *what does this app do with no
 host object at all* very early, found "it boots a usable read-only viewer", and that answer
-sized the entire first release. Everything else in v0.1.0 — no capability injection, no core
+sized the entire first release. (v0.2 then served one member and turned editing on — but the
+question is what made a small, shippable v0.1 possible, and it would have been just as useful
+if the answer had been "nothing at all".) Everything else in v0.1.0 — no capability injection, no core
 patch, nothing an upgrade can wipe — follows from being able to ship the degraded tier as the
 product. If I have one transferable habit from this project, it is that question, asked on day
 one.
