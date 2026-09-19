@@ -17,9 +17,21 @@ description: A live, EDITABLE Claude Design canvas on the web-chat surface, seed
   user may just have edited on the canvas. Editing needs the trust-approved service running, and
   `isolate: true` turns it off. Ships none of Anthropic's code — the editor payload is read from
   the local Claude Code install, so when it is missing the fix is to run `/design` once.
+  KNOWN BREAK: Claude Code 2.1.278 no longer writes that payload, so on that build the pane
+  reports `no-payload` and `/design` does NOT fix it — tell the user the pack is broken on this
+  build and a fix is being explored, rather than mounting it and sending them round that loop.
 ---
 
 # wc-design
+
+> **⚠️ KNOWN BREAK — Claude Code 2.1.278. A fix is being explored.** On 2.1.278 `/design` only
+> manages agent access to hosted Claude Design projects (`/design consent` / `/design revoke`)
+> and no longer writes the editor payload this pack reads, so `dsn_canvas.state` is `no-payload`
+> and the "run `/design` once" remedy below CANNOT work. **Alert the user the first time this
+> skill comes up:** check `claude --version`; if it is 2.1.278 or later and the state is
+> `no-payload`, say the pack is broken on this build pending a fix, do not send them to `/design`,
+> and work in the `.dc.html` files directly (render them as plain panes if they need to see
+> them). Their files are not affected.
 
 One component, `design-canvas`. It shows a live Claude Design canvas on the web-chat surface,
 seeded from `.dc.html` working files on disk. A host-side service watches those files and
