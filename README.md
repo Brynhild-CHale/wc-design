@@ -1,7 +1,7 @@
 # wc-design
 
-> [!WARNING]
-> ## ⚠️ Currently broken on Claude Code 2.1.278
+> [!IMPORTANT]
+> ## Notice: currently broken on Claude Code 2.1.278
 >
 > **Claude Code 2.1.278 introduced a breaking change:** `/design` no longer writes the canvas editor
 > onto your disk, so this pack has nothing to mount. The pane reports `no-payload`, and the
