@@ -1,5 +1,14 @@
 # wc-design
 
+> [!WARNING]
+> ## ⚠️ Currently broken on Claude Code 2.1.278
+>
+> **Claude Code 2.1.278 introduced a breaking change:** `/design` no longer writes the canvas editor
+> onto your disk, so this pack has nothing to mount. The pane reports `no-payload`, and the
+> "run `/design` once" step under [Setup](#setup) does not bring it back.
+>
+> **We are exploring a fix.** Your `.dc.html` files are not affected.
+
 A `claude-web-chat` component pack that wraps **Claude Design's canvas editor** and runs it locally,
 against the `.dc.html` files in a directory on your own disk. The canvas mounts in a web-chat pane, so
 you edit with the tools you already know — click-to-select, properties panel, inline text, undo/redo —
